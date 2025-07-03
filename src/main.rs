@@ -246,6 +246,13 @@ async fn run_stt<F>(stt_url: &str, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static,
 {
+    // Ensure URL ends with a slash
+    let stt_url = if !stt_url.ends_with('/') {
+        format!("{}/", stt_url)
+    } else {
+        stt_url.to_string()
+    };
+
     let mut audio_input = AudioInput::new()?;
     debug!(
         "Using audio device with {} channels at {} Hz",
@@ -254,7 +261,7 @@ where
     );
 
     let mut audio_buffer = AudioBuffer::new(audio_input.get_sample_rate(), 160);
-    let stt_client = SttClient::new(stt_url, audio_input.get_sample_rate());
+    let stt_client = SttClient::new(&stt_url, audio_input.get_sample_rate());
 
     let (audio_tx, handle) = stt_client
         .connect_and_transcribe(on_transcription)
