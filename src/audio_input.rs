@@ -1,7 +1,9 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream};
-use tracing::{debug, error, info};
+use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use tracing::{debug, error};
+use std::sync::mpsc;
+use std::sync::Arc;
 
 pub struct AudioInput {
     device: Device,

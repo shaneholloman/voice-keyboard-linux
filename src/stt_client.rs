@@ -3,7 +3,8 @@ use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, warn};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordInfo {
@@ -33,6 +34,21 @@ impl SttClient {
             url: url.to_string(),
             sample_rate,
         }
+    }
+
+    pub async fn test_connection(&self) -> Result<()> {
+        // Try to establish a connection with a short timeout
+        let url = self.url.clone();
+        let timeout = Duration::from_secs(2);
+        
+        tokio::time::timeout(timeout, async move {
+            let (_ws_stream, _) = tokio_tungstenite::connect_async(&url)
+                .await
+                .context("Failed to connect to STT service")?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .context("Connection timed out")?
     }
 
     pub async fn connect_and_transcribe<F>(

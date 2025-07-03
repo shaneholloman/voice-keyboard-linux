@@ -135,8 +135,7 @@ async fn main() -> Result<()> {
             Arg::new("stt-url")
                 .long("stt-url")
                 .help("Custom STT service URL")
-                .value_name("URL")
-                .default_value("ws://localhost:8765"),
+                .value_name("URL"),
         )
         .get_matches();
 
@@ -156,13 +155,23 @@ async fn main() -> Result<()> {
     if matches.get_flag("test-audio") {
         test_audio().await?;
     } else if matches.get_flag("test-stt") {
-        let stt_url = matches.get_one::<String>("stt-url").unwrap();
+        let stt_url = matches
+            .get_one::<String>("stt-url")
+            .map(|s| s.as_str())
+            .unwrap_or("ws://localhost:8765");
         test_stt(keyboard, stt_url).await?;
-    } else if matches.get_flag("debug-stt") {
-        let stt_url = matches.get_one::<String>("stt-url").unwrap();
-        debug_stt(stt_url).await?;
     } else {
-        info!("Voice Keyboard is ready. Use --test-audio, --test-stt, or --debug-stt to test functionality.");
+        let debug_mode = matches.get_flag("debug-stt");
+        let stt_url = matches
+            .get_one::<String>("stt-url")
+            .map(|s| s.as_str())
+            .unwrap_or("ws://localhost:8765");
+
+        if debug_mode {
+            debug_stt(stt_url).await?;
+        } else {
+            test_stt(keyboard, stt_url).await?;
+        }
     }
 
     Ok(())
@@ -246,11 +255,24 @@ async fn run_stt<F>(stt_url: &str, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static,
 {
+    // Try local server first if no specific URL is provided
+    let stt_url = if stt_url == "ws://localhost:8765" {
+        match SttClient::new(stt_url, 16000).test_connection().await {
+            Ok(_) => stt_url.to_string(),
+            Err(e) => {
+                info!("Local STT server not available ({}), falling back to Deepgram...", e);
+                "wss://river.sandbox.deepgram.com".to_string()
+            }
+        }
+    } else {
+        stt_url.to_string()
+    };
+
     // Ensure URL ends with a slash
     let stt_url = if !stt_url.ends_with('/') {
         format!("{}/", stt_url)
     } else {
-        stt_url.to_string()
+        stt_url
     };
 
     let mut audio_input = AudioInput::new()?;

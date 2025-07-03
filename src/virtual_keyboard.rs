@@ -3,8 +3,12 @@ use nix::fcntl::{open, OFlag};
 use nix::sys::stat::Mode;
 use nix::unistd::close;
 use std::io::Write;
-use std::os::unix::io::{FromRawFd, RawFd};
+use std::os::unix::io::FromRawFd;
 use tracing::{debug, error, info, warn};
+use input_event_codes::*;
+use nix::ioctl_write_ptr;
+use std::fs::{File, OpenOptions};
+use std::os::fd::AsRawFd;
 
 use crate::input_event::*;
 
@@ -15,8 +19,34 @@ nix::ioctl_write_int!(ui_set_keybit, b'U', 101);
 nix::ioctl_none!(ui_dev_create, b'U', 1);
 nix::ioctl_none!(ui_dev_destroy, b'U', 2);
 
+// UI_SET_EVBIT
+const UI_SET_EVBIT: u8 = 0x40;
+const UI_SET_KEYBIT: u8 = 0x41;
+const UI_DEV_CREATE: u8 = 0x45;
+const UI_DEV_DESTROY: u8 = 0x46;
+
+#[repr(C)]
+struct UInputUserDev {
+    name: [u8; 80],
+    id: UInputId,
+    ff_effects_max: u32,
+    absmax: [i32; 64],
+    absmin: [i32; 64],
+    absfuzz: [i32; 64],
+    absflat: [i32; 64],
+}
+
+#[repr(C)]
+#[derive(Default)]
+struct UInputId {
+    bustype: u16,
+    vendor: u16,
+    product: u16,
+    version: u16,
+}
+
 pub struct VirtualKeyboard {
-    fd: RawFd,
+    fd: i32,
     name: String,
 }
 
