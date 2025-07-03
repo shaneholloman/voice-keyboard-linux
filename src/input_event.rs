@@ -15,12 +15,12 @@ impl InputEvent {
             tv_sec: 0,
             tv_usec: 0,
         };
-        
+
         // Get current time
         unsafe {
             libc::gettimeofday(&mut tv, std::ptr::null_mut());
         }
-        
+
         Self {
             time: tv,
             type_,
@@ -28,11 +28,11 @@ impl InputEvent {
             value,
         }
     }
-    
+
     pub fn key_event(key: u16, pressed: bool) -> Self {
         Self::new(EV_KEY, key, if pressed { 1 } else { 0 })
     }
-    
+
     pub fn syn_event() -> Self {
         Self::new(EV_SYN, SYN_REPORT, 0)
     }
@@ -125,7 +125,7 @@ pub const UINPUT_MAX_NAME_SIZE: usize = 80;
 pub const UI_SET_EVBIT: libc::c_ulong = 0x40045564;
 pub const UI_SET_KEYBIT: libc::c_ulong = 0x40045565;
 
-// UI_DEV_* ioctl constants  
+// UI_DEV_* ioctl constants
 pub const UI_DEV_CREATE: libc::c_ulong = 0x5501;
 pub const UI_DEV_DESTROY: libc::c_ulong = 0x5502;
 
@@ -150,11 +150,11 @@ impl UInputSetup {
             name: [0; UINPUT_MAX_NAME_SIZE],
             ff_effects_max: 0,
         };
-        
+
         let name_bytes = name.as_bytes();
         let copy_len = std::cmp::min(name_bytes.len(), UINPUT_MAX_NAME_SIZE - 1);
         setup.name[..copy_len].copy_from_slice(&name_bytes[..copy_len]);
-        
+
         setup
     }
 }
@@ -253,13 +253,13 @@ pub fn char_to_keycode(c: char) -> Option<(u16, bool)> {
 // Helper function to get all required key codes for keyboard setup
 pub fn get_all_keycodes() -> Vec<u16> {
     let mut keys = Vec::new();
-    
+
     // Add all keycodes in sequential order from 1 to 255
     // This ensures we don't miss any codes needed for special characters
     for i in 1..=255 {
         keys.push(i);
     }
-    
+
     keys
 }
 
@@ -288,4 +288,4 @@ impl Default for UInputUserDev {
             absflat: [0; 64],
         }
     }
-} 
+}
