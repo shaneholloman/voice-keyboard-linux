@@ -4,8 +4,10 @@ use tracing::{error, info};
 
 mod virtual_keyboard;
 mod input_event;
+mod audio_input;
 
 use virtual_keyboard::VirtualKeyboard;
+use audio_input::AudioInput;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -17,6 +19,10 @@ struct Args {
     /// Test mode - just create keyboard and exit
     #[arg(short, long)]
     test: bool,
+    
+    /// Test audio input - list devices and record for 5 seconds
+    #[arg(short = 'a', long)]
+    test_audio: bool,
     
     /// Device name for the virtual keyboard
     #[arg(short, long, default_value = "Voice Keyboard")]
@@ -34,6 +40,10 @@ async fn main() -> Result<()> {
         .init();
     
     info!("Starting Voice Keyboard v{}", env!("CARGO_PKG_VERSION"));
+    
+    if args.test_audio {
+        return test_audio().await;
+    }
     
     // Check if we have access to /dev/uinput
     let uinput_path = std::path::Path::new("/dev/uinput");
@@ -143,5 +153,69 @@ async fn test_keyboard(keyboard: &mut VirtualKeyboard) -> Result<()> {
     keyboard.press_enter()?;
     
     info!("Keyboard test completed!");
+    Ok(())
+}
+
+async fn test_audio() -> Result<()> {
+    info!("Testing audio input...");
+    
+    // List available devices
+    info!("Available input devices:");
+    let devices = AudioInput::list_available_devices()?;
+    for (i, device) in devices.iter().enumerate() {
+        info!("  {}: {}", i + 1, device);
+    }
+    
+    // Create audio input
+    let mut audio = AudioInput::new()?;
+    let channels = audio.get_channels();
+    info!(
+        "Using audio device with {} channels at {} Hz",
+        channels,
+        audio.get_sample_rate()
+    );
+    
+    // Start recording for 5 seconds
+    info!("Recording for 5 seconds...");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
+    
+    audio.start_recording(move |data: &[f32]| {
+        // Average all channels together if multichannel
+        let averaged_samples = if channels == 1 {
+            // Mono audio - use as is
+            data.to_vec()
+        } else {
+            // Multichannel audio - average channels together
+            let num_frames = data.len() / channels as usize;
+            let mut averaged = Vec::with_capacity(num_frames);
+            
+            for frame in 0..num_frames {
+                let mut sum = 0.0;
+                for channel in 0..channels as usize {
+                    sum += data[frame * channels as usize + channel];
+                }
+                averaged.push(sum / channels as f32);
+            }
+            averaged
+        };
+        
+        // Calculate RMS amplitude of the averaged audio data
+        let rms = (averaged_samples.iter().map(|s| s * s).sum::<f32>() / averaged_samples.len() as f32).sqrt();
+        let _ = tx.blocking_send(rms);
+    })?;
+    
+    // Monitor audio levels for 5 seconds
+    let start = std::time::Instant::now();
+    while (std::time::Instant::now() - start).as_secs() < 5 {
+        if let Some(rms) = rx.recv().await {
+            let level = (rms * 50.0) as usize;
+            let meter = "#".repeat(level);
+            info!("Level: {:.2} [{}]", rms, meter);
+        }
+    }
+    
+    audio.stop_recording();
+    info!("Audio test completed!");
+    
     Ok(())
 }
