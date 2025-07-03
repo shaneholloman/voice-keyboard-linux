@@ -48,13 +48,13 @@ impl SttClient {
             self.url, self.sample_rate
         );
 
-        info!("Connecting to speech-to-text service: {}", ws_url);
+        debug!("Connecting to speech-to-text service: {}", ws_url);
 
         let (ws_stream, _) = connect_async(&ws_url)
             .await
             .context("Failed to connect to WebSocket")?;
 
-        info!("Connected to speech-to-text service");
+        debug!("Connected to speech-to-text service");
 
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
@@ -81,7 +81,7 @@ impl SttClient {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
-                            debug!("Received message: {}", text);
+                            debug!("Received text message: {}", text);
 
                             match serde_json::from_str::<TranscriptionResult>(&text) {
                                 Ok(result) => {
@@ -93,10 +93,34 @@ impl SttClient {
                             }
                         }
                         Ok(Message::Binary(data)) => {
-                            debug!("Received binary message: {} bytes", data.len());
+                            // Try to parse binary data as UTF-8 text first (for JSON responses)
+                            match String::from_utf8(data.clone()) {
+                                Ok(text) => {
+                                    debug!("Received binary message as text: {}", text);
+                                    
+                                    match serde_json::from_str::<TranscriptionResult>(&text) {
+                                        Ok(result) => {
+                                            on_transcription(result);
+                                        }
+                                        Err(e) => {
+                                            warn!("Failed to parse binary message as JSON: {}", e);
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    // Show first few bytes for debugging
+                                    let preview = if data.len() > 10 {
+                                        format!("{:?}...", &data[..10])
+                                    } else {
+                                        format!("{:?}", data)
+                                    };
+                                    debug!("Received binary message: {} bytes (not UTF-8 text, UTF-8 error: {}, preview: {})", 
+                                          data.len(), e, preview);
+                                }
+                            }
                         }
                         Ok(Message::Close(_)) => {
-                            info!("WebSocket closed by server");
+                            debug!("WebSocket closed by server");
                             break;
                         }
                         Err(e) => {
@@ -111,10 +135,10 @@ impl SttClient {
             // Wait for either task to complete
             tokio::select! {
                 _ = send_task => {
-                    info!("Audio sending task completed");
+                    debug!("Audio sending task completed");
                 }
                 _ = receive_task => {
-                    info!("Transcription receiving task completed");
+                    debug!("Transcription receiving task completed");
                 }
             }
 
@@ -135,6 +159,9 @@ impl AudioBuffer {
         // Calculate chunk size for 16-bit PCM audio
         // chunk_size = sample_rate * (chunk_duration_ms / 1000) * 2 bytes per sample
         let chunk_size = (sample_rate * chunk_duration_ms / 1000 * 2) as usize;
+
+        debug!("AudioBuffer: sample_rate={}, chunk_duration_ms={}, calculated chunk_size={} bytes", 
+              sample_rate, chunk_duration_ms, chunk_size);
 
         Self {
             buffer: Vec::new(),
@@ -157,8 +184,13 @@ impl AudioBuffer {
         // Extract complete chunks
         let mut chunks = Vec::new();
         while self.buffer.len() >= self.chunk_size {
-            let chunk = self.buffer.drain(..self.chunk_size).collect();
+            let chunk: Vec<u8> = self.buffer.drain(..self.chunk_size).collect();
             chunks.push(chunk);
+        }
+
+        if !chunks.is_empty() {
+            debug!("Created {} audio chunks of {} bytes each (buffer size: {}, chunk_size: {})", 
+                  chunks.len(), chunks[0].len(), self.buffer.len(), self.chunk_size);
         }
 
         chunks

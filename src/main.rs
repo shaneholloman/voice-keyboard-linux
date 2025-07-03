@@ -5,7 +5,7 @@ use std::env;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
-use tracing::{error, info};
+use tracing::{debug, error, info};
 
 mod audio_input;
 mod input_event;
@@ -52,7 +52,7 @@ impl OriginalUser {
 
     fn drop_privileges(&self) -> Result<()> {
         if getuid().is_root() {
-            info!(
+            debug!(
                 "Dropping root privileges to uid={}, gid={}",
                 self.uid, self.gid
             );
@@ -89,12 +89,12 @@ impl OriginalUser {
                 env::set_var("WAYLAND_DISPLAY", wayland_disp);
             }
 
-            info!("Successfully dropped privileges to user");
+            debug!("Successfully dropped privileges to user");
 
             // Give audio system a moment to be ready
             std::thread::sleep(std::time::Duration::from_millis(100));
         } else {
-            info!("Not running as root, no privilege dropping needed");
+            debug!("Not running as root, no privilege dropping needed");
         }
 
         Ok(())
@@ -126,6 +126,12 @@ async fn main() -> Result<()> {
                 .action(clap::ArgAction::SetTrue),
         )
         .arg(
+            Arg::new("debug-stt")
+                .long("debug-stt")
+                .help("Debug speech-to-text (print transcripts without typing)")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
             Arg::new("stt-url")
                 .long("stt-url")
                 .help("Custom STT service URL")
@@ -137,10 +143,10 @@ async fn main() -> Result<()> {
     let device_name = "Voice Keyboard";
 
     // Step 1: Create virtual keyboard while we have root privileges
-    info!("Creating virtual keyboard device (requires root privileges)...");
+    debug!("Creating virtual keyboard device (requires root privileges)...");
     let keyboard =
         VirtualKeyboard::new(device_name).context("Failed to create virtual keyboard")?;
-    info!("Virtual keyboard created successfully");
+    debug!("Virtual keyboard created successfully");
 
     // Step 2: Drop root privileges before initializing audio
     original_user
@@ -152,8 +158,11 @@ async fn main() -> Result<()> {
     } else if matches.get_flag("test-stt") {
         let stt_url = matches.get_one::<String>("stt-url").unwrap();
         test_stt(keyboard, stt_url).await?;
+    } else if matches.get_flag("debug-stt") {
+        let stt_url = matches.get_one::<String>("stt-url").unwrap();
+        debug_stt(stt_url).await?;
     } else {
-        info!("Voice Keyboard is ready. Use --test-audio or --test-stt to test functionality.");
+        info!("Voice Keyboard is ready. Use --test-audio, --test-stt, or --debug-stt to test functionality.");
     }
 
     Ok(())
@@ -171,7 +180,7 @@ async fn test_audio() -> Result<()> {
 
     // Create audio input
     let mut audio_input = AudioInput::new()?;
-    info!(
+    debug!(
         "Using audio device with {} channels at {} Hz",
         audio_input.get_channels(),
         audio_input.get_sample_rate()
@@ -203,86 +212,90 @@ async fn test_audio() -> Result<()> {
 
 async fn test_stt(keyboard: VirtualKeyboard, stt_url: &str) -> Result<()> {
     info!("Testing speech-to-text functionality...");
+    
+    run_stt(stt_url, move |result| {
+        info!("Transcription [{}]: {}", result.event, result.transcript);
+        
+        // Type completed transcriptions (EndOfTurn events)
+        if result.event == "EndOfTurn" && !result.transcript.is_empty() {
+            info!("Typing: {}", result.transcript);
+            if let Err(e) = keyboard.type_text(&result.transcript) {
+                error!("Failed to type text: {}", e);
+            }
+            if let Err(e) = keyboard.press_enter() {
+                error!("Failed to press enter: {}", e);
+            }
+        }
+    }).await
+}
+
+async fn debug_stt(stt_url: &str) -> Result<()> {
+    info!("Debugging speech-to-text functionality...");
     info!("STT Service URL: {}", stt_url);
 
-    // Create audio input after privilege drop
-    let mut audio_input = AudioInput::new()?;
-    let channels = audio_input.get_channels();
-    let sample_rate = audio_input.get_sample_rate();
+    run_stt(stt_url, |result| {
+        info!("Transcription [{}]: {}", result.event, result.transcript);
+    })
+    .await
+}
 
-    info!(
+async fn run_stt<F>(stt_url: &str, on_transcription: F) -> Result<()>
+where
+    F: Fn(stt_client::TranscriptionResult) + Send + 'static,
+{
+    let mut audio_input = AudioInput::new()?;
+    debug!(
         "Using audio device with {} channels at {} Hz",
-        channels, sample_rate
+        audio_input.get_channels(),
+        audio_input.get_sample_rate()
     );
 
-    // Create STT client
-    let stt_client = SttClient::new(stt_url, sample_rate);
+    let mut audio_buffer = AudioBuffer::new(audio_input.get_sample_rate(), 160);
+    let stt_client = SttClient::new(stt_url, audio_input.get_sample_rate());
 
-    // Connect to STT service
-    let (audio_tx, stt_handle) = stt_client
-        .connect_and_transcribe(move |result| {
-            info!("Transcription [{}]: {}", result.event, result.transcript);
-
-            // Type completed transcriptions (EndOfTurn events)
-            if result.event == "EndOfTurn" && !result.transcript.is_empty() {
-                info!("Typing: {}", result.transcript);
-                if let Err(e) = keyboard.type_text(&result.transcript) {
-                    error!("Failed to type text: {}", e);
-                }
-                if let Err(e) = keyboard.press_enter() {
-                    error!("Failed to press enter: {}", e);
-                }
-            }
-        })
-        .await?;
-
-    // Create audio buffer for chunking
-    let mut audio_buffer = AudioBuffer::new(sample_rate, 80); // 80ms chunks
+    let (audio_tx, handle) = stt_client
+        .connect_and_transcribe(on_transcription)
+        .await
+        .context("Failed to connect to STT service")?;
 
     info!("Listening for speech... Speak into your microphone!");
     info!("Press Ctrl+C to stop.");
 
-    // Start audio recording
+    let audio_tx = std::sync::Arc::new(audio_tx);
     let audio_tx_clone = audio_tx.clone();
-    audio_input.start_recording(move |data| {
-        // Average all channels together if multichannel
-        let averaged_samples = if channels == 1 {
-            // Mono audio - use as is
-            data.to_vec()
-        } else {
-            // Multichannel audio - average channels together
-            let num_frames = data.len() / channels as usize;
-            let mut averaged = Vec::with_capacity(num_frames);
+    let channels = audio_input.get_channels();
 
-            for frame in 0..num_frames {
-                let mut sum = 0.0;
-                for channel in 0..channels as usize {
-                    sum += data[frame * channels as usize + channel];
-                }
-                averaged.push(sum / channels as f32);
+    // Start recording
+    audio_input.start_recording(move |data| {
+        debug!("Received audio data: {} samples", data.len());
+
+        // Average stereo channels to mono
+        let mono_data: Vec<f32> = if channels == 2 {
+            let mut mono = Vec::with_capacity(data.len() / 2);
+            for chunk in data.chunks_exact(2) {
+                mono.push((chunk[0] + chunk[1]) / 2.0);
             }
-            averaged
+            debug!("Averaged samples: {}", mono.len());
+            mono
+        } else {
+            data.to_vec()
         };
 
-        // Convert to chunks and send to STT
-        let chunks = audio_buffer.add_samples(&averaged_samples);
+        // Create audio chunks and send them
+        let chunks = audio_buffer.add_samples(&mono_data);
         for chunk in chunks {
+            debug!("Sending audio chunk: {} bytes", chunk.len());
             if let Err(e) = audio_tx_clone.blocking_send(chunk) {
                 error!("Failed to send audio chunk: {}", e);
             }
         }
     })?;
 
-    // Keep the main thread alive
+    // Keep the program running until Ctrl+C
     tokio::signal::ctrl_c().await?;
-    info!("Shutting down...");
 
-    // Stop recording and clean up
-    audio_input.stop_recording();
-    drop(audio_tx); // Close the audio channel
-
-    info!("Waiting for STT connection to close...");
-    let _ = stt_handle.await;
+    // Wait for the STT client to finish
+    handle.await??;
 
     Ok(())
 }

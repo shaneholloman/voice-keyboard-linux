@@ -18,7 +18,7 @@ impl AudioInput {
             .default_input_device()
             .context("Failed to get default input device")?;
 
-        info!("Using input device: {}", device.name()?);
+        debug!("Using input device: {}", device.name()?);
 
         // Get the default config for the input device
         let config = device
@@ -59,7 +59,7 @@ impl AudioInput {
             .next()
             .context(format!("Device '{}' not found", device_name))?;
 
-        info!("Using input device: {}", device.name()?);
+        debug!("Using input device: {}", device.name()?);
 
         // Get the default config for the input device
         let config = device

@@ -54,6 +54,9 @@ Use the provided runner script:
 # Test speech-to-text (requires STT service)
 ./run.sh --test-stt
 
+# Debug speech-to-text (print transcripts without typing)
+./run.sh --debug-stt
+
 # Use custom STT service URL
 ./run.sh --test-stt --stt-url "wss://your-stt-service.com/"
 ```
@@ -93,6 +96,7 @@ voice-keyboard [OPTIONS]
 OPTIONS:
     --test-audio         Test audio input and show levels
     --test-stt          Test speech-to-text functionality
+    --debug-stt         Debug speech-to-text (print transcripts without typing)
     --stt-url <URL>     Custom STT service URL (default: ws://localhost:8765)
     -h, --help          Print help information
     -V, --version       Print version information
