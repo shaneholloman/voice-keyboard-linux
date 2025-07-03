@@ -44,8 +44,9 @@ impl SttClient {
     {
         // Build WebSocket URL with query parameters
         let ws_url = format!(
-            "{}?sample_rate={}&preflight_threshold=0.5&eot_threshold=0.8&eot_timeout_ms=3000",
-            self.url, self.sample_rate
+            "{}?sample_rate={}&preflight_threshold=0.8&eot_threshold=0.7&eot_timeout_ms=3000",
+//            "{}?sample_rate={}",
+self.url, self.sample_rate
         );
 
         debug!("Connecting to speech-to-text service: {}", ws_url);

@@ -234,7 +234,10 @@ async fn debug_stt(stt_url: &str) -> Result<()> {
     info!("STT Service URL: {}", stt_url);
 
     run_stt(stt_url, |result| {
-        info!("Transcription [{}]: {}", result.event, result.transcript);
+        // Only show non-empty transcriptions
+        if !result.transcript.is_empty() {
+            info!("Transcription [{}]: {}", result.event, result.transcript);
+        }
     })
     .await
 }
@@ -291,10 +294,7 @@ where
         }
     })?;
 
-    // Keep the program running until Ctrl+C
-    tokio::signal::ctrl_c().await?;
-
-    // Wait for the STT client to finish
+    // Just wait for the STT client to finish (will be interrupted by Ctrl+C)
     handle.await??;
 
     Ok(())
