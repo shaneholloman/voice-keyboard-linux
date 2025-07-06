@@ -222,17 +222,28 @@ async fn test_audio() -> Result<()> {
 async fn test_stt(keyboard: VirtualKeyboard, stt_url: &str) -> Result<()> {
     info!("Testing speech-to-text functionality...");
     
+    // Wrap keyboard in a mutex to allow mutable access from the closure
+    let keyboard = std::sync::Arc::new(std::sync::Mutex::new(keyboard));
+    let keyboard_clone = keyboard.clone();
+    
     run_stt(stt_url, move |result| {
         info!("Transcription [{}]: {}", result.event, result.transcript);
         
-        // Type completed transcriptions (EndOfTurn events)
-        if result.event == "EndOfTurn" && !result.transcript.is_empty() {
-            info!("Typing: {}", result.transcript);
-            if let Err(e) = keyboard.type_text(&result.transcript) {
-                error!("Failed to type text: {}", e);
+        let mut kb = keyboard_clone.lock().unwrap();
+        
+        // Handle different event types
+        match result.event.as_str() {
+            "EndOfTurn" => {
+                // Finalize the transcript and press enter
+                if let Err(e) = kb.finalize_transcript() {
+                    error!("Failed to finalize transcript: {}", e);
+                }
             }
-            if let Err(e) = keyboard.press_enter() {
-                error!("Failed to press enter: {}", e);
+            _ => {
+                // Handle incremental updates for all other events
+                if let Err(e) = kb.update_transcript(&result.transcript) {
+                    error!("Failed to update transcript: {}", e);
+                }
             }
         }
     }).await
