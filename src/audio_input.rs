@@ -1,9 +1,7 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{Device, SampleFormat, Stream, StreamConfig};
+use cpal::{Device, SampleFormat, Stream};
 use tracing::{debug, error};
-use std::sync::mpsc;
-use std::sync::Arc;
 
 pub struct AudioInput {
     device: Device,
@@ -141,6 +139,7 @@ impl AudioInput {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub fn stop_recording(&mut self) {
         self.stream = None;
     }
