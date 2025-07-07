@@ -36,21 +36,6 @@ impl SttClient {
         }
     }
 
-    pub async fn test_connection(&self) -> Result<()> {
-        // Try to establish a connection with a short timeout
-        let url = self.url.clone();
-        let timeout = Duration::from_secs(2);
-        
-        tokio::time::timeout(timeout, async move {
-            let (_ws_stream, _) = tokio_tungstenite::connect_async(&url)
-                .await
-                .context("Failed to connect to STT service")?;
-            Ok::<(), anyhow::Error>(())
-        })
-        .await
-        .context("Connection timed out")?
-    }
-
     pub async fn connect_and_transcribe<F>(
         &self,
         mut on_transcription: F,
