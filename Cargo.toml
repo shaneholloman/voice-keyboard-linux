@@ -7,7 +7,6 @@ edition = "2021"
 anyhow = "1.0"
 clap = { version = "4.0", features = ["derive"] }
 cpal = "0.15"
-input-event-codes = "5.16"
 libc = "0.2"
 tokio = { version = "1.0", features = ["full"] }
 tokio-tungstenite = { version = "0.21", features = ["native-tls"] }

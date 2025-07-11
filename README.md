@@ -1,14 +1,14 @@
 # Voice Keyboard
 
-A Rust-based voice-controlled keyboard that converts speech to text and types it into any application.
+A voice-controlled Linux virtual keyboard that converts speech to text and types it into any application.
+
+As a result of directly targeting Linux as a driver, this works with all Linux applications.
 
 ## Features
 
 - **Voice-to-Text**: Real-time speech recognition using WebSocket STT services
 - **Virtual Keyboard**: Creates a virtual input device that works with all applications
-- **Privilege Dropping**: Secure privilege management - starts as root to create virtual keyboard, then drops to user privileges for audio access
-- **Cross-Platform Audio**: Works with PipeWire, PulseAudio, and ALSA
-- **Real-time Processing**: Low-latency audio streaming and transcription
+- **Incremental Typing**: Smart transcript updates with minimal backspacing for real-time corrections
 
 ## Architecture
 
@@ -38,7 +38,7 @@ sudo apt install libasound2-dev
 ```bash
 git clone <repository-url>
 cd voice-keyboard
-cargo build --release
+cargo build
 ```
 
 ## Usage
@@ -48,45 +48,22 @@ cargo build --release
 Use the provided runner script:
 
 ```bash
-# Test audio input
-./run.sh --test-audio
-
-# Test speech-to-text (requires STT service)
-./run.sh --test-stt
-
-# Debug speech-to-text (print transcripts without typing)
-./run.sh --debug-stt
-
-# Use custom STT service URL
-./run.sh --test-stt --stt-url "wss://your-stt-service.com/"
+./run.sh
 ```
 
 ### Manual Method
 
 ```bash
 # Build and run with proper privilege handling
-cargo build --release
-sudo -E ./target/release/voice-keyboard --test-stt
+cargo build
+sudo -E ./target/debug/voice-keyboard --test-stt
 ```
 
 **Important**: Always use `sudo -E` to preserve environment variables needed for audio access.
 
 ## Speech-to-Text Service
 
-The application connects to a WebSocket-based STT service. The default URL is `ws://localhost:8765`.
-
-### Expected STT Service API
-
-The service should accept:
-- WebSocket connections with query parameters: `sample_rate`, `preflight_threshold`, `eot_threshold`, `eot_timeout_ms`
-- Binary audio data (16-bit PCM, little-endian)
-- Return JSON transcription results with `event`, `transcript`, and confidence fields
-
-### Example STT Services
-
-- Local: Run your own STT service on `localhost:8765`
-- Remote: Use `--stt-url` to connect to external services
-- Compatible with Deepgram River API format
+The application connects to the Deepgram "River" STT service. The default URL is `wss://river.sandbox.deepgram.com`.
 
 ## Command Line Options
 
@@ -94,13 +71,15 @@ The service should accept:
 voice-keyboard [OPTIONS]
 
 OPTIONS:
-    --test-audio         Test audio input and show levels
-    --test-stt          Test speech-to-text functionality
+    --test-audio        Test audio input and show levels
+    --test-stt          Test speech-to-text functionality (default if no other mode specified)
     --debug-stt         Debug speech-to-text (print transcripts without typing)
-    --stt-url <URL>     Custom STT service URL (default: ws://localhost:8765)
+    --stt-url <URL>     Custom STT service URL (default: wss://river.sandbox.deepgram.com)
     -h, --help          Print help information
     -V, --version       Print version information
 ```
+
+**Note**: If no mode is specified, the application defaults to `--test-stt` behavior.
 
 ## How It Works
 
@@ -109,7 +88,16 @@ OPTIONS:
 3. **Privilege Drop**: Drops to original user privileges
 4. **Audio Access**: Accesses PipeWire/PulseAudio in user space
 5. **Speech Recognition**: Streams audio to STT service
-6. **Text Input**: Types transcribed text via virtual keyboard
+6. **Incremental Typing**: Updates text in real-time with smart backspacing
+7. **Turn Finalization**: Clears tracking on "EndOfTurn" events (user presses Enter manually)
+
+### Transcript Handling
+
+The application provides sophisticated real-time transcript updates:
+
+- **Incremental Updates**: As speech is recognized, the application updates the typed text by finding the common prefix between the current and new transcript, backspacing only the changed portion, and typing the new ending
+- **Smart Backspacing**: Minimizes cursor movement by only removing characters that actually changed
+- **Turn Management**: On "EndOfTurn" events, the application clears its internal tracking but doesn't automatically press Enter, allowing users to review before submitting
 
 ## Security
 
@@ -136,14 +124,6 @@ If you get "Permission denied" for `/dev/uinput`:
 2. **Verify device exists**: `ls -la /dev/uinput`
 3. **Use sudo**: The application is designed to run with `sudo -E`
 
-### Build Issues
-
-If you get compilation errors:
-
-1. **Update Rust**: `rustup update`
-2. **Install dependencies**: See Prerequisites section
-3. **Clean build**: `cargo clean && cargo build`
-
 ## Development
 
 ### Project Structure
@@ -160,14 +140,12 @@ src/
 ### Key Components
 
 - **OriginalUser**: Captures and restores user context
-- **VirtualKeyboard**: Manages uinput device lifecycle
+- **VirtualKeyboard**: Manages uinput device lifecycle with smart transcript updates
 - **AudioInput**: Cross-platform audio capture
 - **SttClient**: WebSocket-based speech-to-text client
+- **AudioBuffer**: Manages audio chunking for STT streaming
 
 ## License
 
 [Add your license here]
 
-## Contributing
-
-[Add contribution guidelines here] 

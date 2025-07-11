@@ -686,12 +686,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "input-event-codes"
-version = "5.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11b1a5cc47f091163e71c6932327e71669430da49adb09a6a056c1b3e81cd1ca"
-
-[[package]]
 name = "io-uring"
 version = "0.7.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1710,7 +1704,6 @@ dependencies = [
  "clap",
  "cpal",
  "futures-util",
- "input-event-codes",
  "libc",
  "nix",
  "serde",
