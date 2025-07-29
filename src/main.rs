@@ -14,7 +14,7 @@ mod virtual_keyboard;
 
 use audio_input::AudioInput;
 use stt_client::{AudioBuffer, SttClient};
-use virtual_keyboard::VirtualKeyboard;
+use virtual_keyboard::{RealKeyboardHardware, VirtualKeyboard};
 
 const DEEPGRAM_STT_URL: &str = "wss://river.sandbox.deepgram.com";
 
@@ -145,8 +145,9 @@ async fn main() -> Result<()> {
 
     // Step 1: Create virtual keyboard while we have root privileges
     debug!("Creating virtual keyboard device (requires root privileges)...");
-    let keyboard =
-        VirtualKeyboard::new(device_name).context("Failed to create virtual keyboard")?;
+    let hardware =
+        RealKeyboardHardware::new(device_name).context("Failed to create keyboard hardware")?;
+    let keyboard = VirtualKeyboard::new(hardware);
     debug!("Virtual keyboard created successfully");
 
     // Step 2: Drop root privileges before initializing audio
@@ -221,7 +222,7 @@ async fn test_audio() -> Result<()> {
     Ok(())
 }
 
-async fn test_stt(keyboard: VirtualKeyboard, stt_url: &str) -> Result<()> {
+async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str) -> Result<()> {
     info!("Testing speech-to-text functionality...");
 
     // Wrap keyboard in a mutex to allow mutable access from the closure

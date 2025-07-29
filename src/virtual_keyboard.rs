@@ -18,13 +18,21 @@ nix::ioctl_write_int!(ui_set_keybit, b'U', 101);
 nix::ioctl_none!(ui_dev_create, b'U', 1);
 nix::ioctl_none!(ui_dev_destroy, b'U', 2);
 
-pub struct VirtualKeyboard {
-    fd: i32,
-    name: String,
-    current_text: String,
+/// Hardware abstraction trait for keyboard operations
+pub trait KeyboardHardware {
+    fn type_text(&mut self, text: &str) -> Result<()>;
+    fn press_backspace(&mut self) -> Result<()>;
+    fn press_enter(&mut self) -> Result<()>;
+    fn press_key(&mut self, keycode: u16) -> Result<()>;
 }
 
-impl VirtualKeyboard {
+/// Real hardware implementation using Linux uinput
+pub struct RealKeyboardHardware {
+    fd: i32,
+    name: String,
+}
+
+impl RealKeyboardHardware {
     pub fn new(device_name: &str) -> Result<Self> {
         info!("Creating virtual keyboard device: {}", device_name);
 
@@ -66,34 +74,39 @@ impl VirtualKeyboard {
         uidev.id.product = 0x5678;
         uidev.id.version = 1;
         uidev.ff_effects_max = 0;
-        // Write the uinput_user_dev structure
+
+        // Write device info
+        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
         let uidev_bytes = unsafe {
             std::slice::from_raw_parts(
-                &uidev as *const crate::input_event::UInputUserDev as *const u8,
+                &uidev as *const _ as *const u8,
                 std::mem::size_of::<crate::input_event::UInputUserDev>(),
             )
         };
-        let mut file = unsafe { std::fs::File::from_raw_fd(fd) };
+
         file.write_all(uidev_bytes)
-            .context("Failed to write device setup")?;
+            .context("Failed to write device info")?;
+
         // Prevent the file from being closed when it goes out of scope
         std::mem::forget(file);
+
         // Create the device
         unsafe {
             ui_dev_create(fd).context("Failed to create uinput device")?;
         }
+
         info!("Virtual keyboard '{}' created successfully", device_name);
+
         Ok(Self {
             fd,
             name: device_name.to_string(),
-            current_text: String::new(),
         })
     }
 
     fn send_event(&self, event: InputEvent) -> Result<()> {
         let event_bytes = unsafe {
             std::slice::from_raw_parts(
-                &event as *const InputEvent as *const u8,
+                &event as *const _ as *const u8,
                 std::mem::size_of::<InputEvent>(),
             )
         };
@@ -105,11 +118,6 @@ impl VirtualKeyboard {
                 event_bytes.len(),
             )
         };
-
-        if bytes_written == -1 {
-            let errno = std::io::Error::last_os_error();
-            return Err(anyhow::anyhow!("Failed to write event: {}", errno));
-        }
 
         if bytes_written != event_bytes.len() as isize {
             return Err(anyhow::anyhow!(
@@ -135,14 +143,10 @@ impl VirtualKeyboard {
 
         Ok(())
     }
+}
 
-    pub fn press_key(&self, keycode: u16) -> Result<()> {
-        self.send_key(keycode, true)?;
-        self.send_key(keycode, false)?;
-        Ok(())
-    }
-
-    pub fn type_text(&self, text: &str) -> Result<()> {
+impl KeyboardHardware for RealKeyboardHardware {
+    fn type_text(&mut self, text: &str) -> Result<()> {
         debug!("Typing text: '{}'", text);
 
         for c in text.chars() {
@@ -172,57 +176,61 @@ impl VirtualKeyboard {
         Ok(())
     }
 
-    pub fn press_enter(&self) -> Result<()> {
-        self.press_key(KEY_ENTER)
-    }
-
-    pub fn press_backspace(&self) -> Result<()> {
+    fn press_backspace(&mut self) -> Result<()> {
         self.press_key(KEY_BACKSPACE)
     }
 
-    pub fn press_tab(&self) -> Result<()> {
-        self.press_key(KEY_TAB)
+    fn press_enter(&mut self) -> Result<()> {
+        self.press_key(KEY_ENTER)
     }
 
-    pub fn press_escape(&self) -> Result<()> {
-        self.press_key(KEY_ESC)
-    }
-
-    pub fn press_space(&self) -> Result<()> {
-        self.press_key(KEY_SPACE)
-    }
-
-    // Special key combinations
-    pub fn press_ctrl_c(&self) -> Result<()> {
-        self.send_key(KEY_LEFTCTRL, true)?;
-        self.send_key(KEY_C, true)?;
-        self.send_key(KEY_C, false)?;
-        self.send_key(KEY_LEFTCTRL, false)?;
+    fn press_key(&mut self, keycode: u16) -> Result<()> {
+        self.send_key(keycode, true)?;
+        self.send_key(keycode, false)?;
         Ok(())
     }
+}
 
-    pub fn press_ctrl_v(&self) -> Result<()> {
-        self.send_key(KEY_LEFTCTRL, true)?;
-        self.send_key(KEY_V, true)?;
-        self.send_key(KEY_V, false)?;
-        self.send_key(KEY_LEFTCTRL, false)?;
-        Ok(())
+impl Drop for RealKeyboardHardware {
+    fn drop(&mut self) {
+        info!("Destroying virtual keyboard '{}'", self.name);
+
+        // Destroy the device
+        unsafe {
+            if let Err(e) = ui_dev_destroy(self.fd) {
+                error!("Failed to destroy uinput device: {}", e);
+            }
+        }
+
+        // Close the file descriptor
+        if let Err(e) = close(self.fd) {
+            error!("Failed to close uinput fd: {}", e);
+        }
+
+        debug!("Virtual keyboard '{}' destroyed", self.name);
+    }
+}
+
+// Safety: RealKeyboardHardware only contains a file descriptor and a string,
+// both of which are safe to send between threads
+unsafe impl Send for RealKeyboardHardware {}
+unsafe impl Sync for RealKeyboardHardware {}
+
+/// Business logic layer that handles transcript processing and enter command detection
+pub struct VirtualKeyboard<H: KeyboardHardware> {
+    hardware: H,
+    current_text: String,
+}
+
+impl<H: KeyboardHardware> VirtualKeyboard<H> {
+    pub fn new(hardware: H) -> Self {
+        Self {
+            hardware,
+            current_text: String::new(),
+        }
     }
 
-    pub fn press_alt_tab(&self) -> Result<()> {
-        self.send_key(KEY_LEFTALT, true)?;
-        self.send_key(KEY_TAB, true)?;
-        self.send_key(KEY_TAB, false)?;
-        self.send_key(KEY_LEFTALT, false)?;
-        Ok(())
-    }
-
-    pub fn get_name(&self) -> &str {
-        &self.name
-    }
-
-    /// Handle incremental transcript updates
-    /// This method will:
+    /// Update the transcript incrementally, handling smart backspacing
     /// 1. Type new characters if the new transcript extends the current one
     /// 2. Only backspace the characters that actually changed, then type the new ending
     pub fn update_transcript(&mut self, new_transcript: &str) -> Result<()> {
@@ -243,7 +251,7 @@ impl VirtualKeyboard {
             let new_chars = &new_transcript[self.current_text.len()..];
             if !new_chars.is_empty() {
                 debug!("Typing new characters: '{}'", new_chars);
-                self.type_text(new_chars)?;
+                self.hardware.type_text(new_chars)?;
                 self.current_text = new_transcript.to_string();
             }
         } else {
@@ -267,7 +275,7 @@ impl VirtualKeyboard {
             if chars_to_backspace > 0 {
                 debug!("Backspacing {} characters", chars_to_backspace);
                 for _ in 0..chars_to_backspace {
-                    self.press_backspace()?;
+                    self.hardware.press_backspace()?;
                 }
             }
 
@@ -276,7 +284,7 @@ impl VirtualKeyboard {
             if common_prefix_len < new_chars.len() {
                 let new_ending: String = new_chars[common_prefix_len..].iter().collect();
                 debug!("Typing new ending: '{}'", new_ending);
-                self.type_text(&new_ending)?;
+                self.hardware.type_text(&new_ending)?;
             }
 
             self.current_text = new_transcript.to_string();
@@ -293,10 +301,10 @@ impl VirtualKeyboard {
         debug!("Finalizing transcript: '{}'", self.current_text);
 
         // Regex to match "enter" (case-insensitive) at the end, optionally followed by
-        // punctuation and/or whitespace: (?i)\s*enter[[:punct:]\s]*$
+        // punctuation and/or whitespace: (?i)\s*\benter\b[[:punct:]\s]*$
         // (?i) = case insensitive
         // \s* = optional leading whitespace
-        // enter = the word "enter"
+        // \benter\b = the word "enter" with word boundaries
         // [[:punct:]\s]* = optional trailing punctuation or whitespace
         // $ = end of string
         let enter_regex = Regex::new(r"(?i)\s*\benter\b[[:punct:]\s]*$").unwrap();
@@ -322,7 +330,7 @@ impl VirtualKeyboard {
 
             // Backspace the matched portion
             for _ in 0..chars_to_backspace {
-                self.press_backspace()?;
+                self.hardware.press_backspace()?;
                 // Small delay between backspaces for reliability
                 std::thread::sleep(std::time::Duration::from_millis(5));
             }
@@ -332,7 +340,7 @@ impl VirtualKeyboard {
 
             // Press the actual ENTER key
             debug!("Pressing ENTER key");
-            self.press_enter()?;
+            self.hardware.press_enter()?;
         }
 
         // Clear the current text tracking
@@ -355,7 +363,7 @@ impl VirtualKeyboard {
         debug!("Backspacing {} characters", char_count);
 
         for _ in 0..char_count {
-            self.press_backspace()?;
+            self.hardware.press_backspace()?;
             // Small delay between backspaces for reliability
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
@@ -370,260 +378,112 @@ impl VirtualKeyboard {
     }
 }
 
-impl Drop for VirtualKeyboard {
-    fn drop(&mut self) {
-        info!("Destroying virtual keyboard '{}'", self.name);
+/// Mock hardware implementation for testing
+pub struct MockKeyboardHardware {
+    pub typed_chars: Vec<char>,
+    pub backspace_count: usize,
+    pub enter_pressed: bool,
+}
 
-        // Destroy the device
-        unsafe {
-            if let Err(e) = ui_dev_destroy(self.fd) {
-                error!("Failed to destroy uinput device: {}", e);
-            }
+impl MockKeyboardHardware {
+    pub fn new() -> Self {
+        Self {
+            typed_chars: Vec::new(),
+            backspace_count: 0,
+            enter_pressed: false,
         }
-
-        // Close the file descriptor
-        if let Err(e) = close(self.fd) {
-            error!("Failed to close uinput fd: {}", e);
-        }
-
-        debug!("Virtual keyboard '{}' destroyed", self.name);
     }
 }
 
-// Safety: VirtualKeyboard only contains a file descriptor and a string,
-// both of which are safe to send between threads
-unsafe impl Send for VirtualKeyboard {}
-unsafe impl Sync for VirtualKeyboard {}
+impl KeyboardHardware for MockKeyboardHardware {
+    fn type_text(&mut self, text: &str) -> Result<()> {
+        for c in text.chars() {
+            self.typed_chars.push(c);
+        }
+        Ok(())
+    }
+
+    fn press_backspace(&mut self) -> Result<()> {
+        self.backspace_count += 1;
+        if !self.typed_chars.is_empty() {
+            self.typed_chars.pop();
+        }
+        Ok(())
+    }
+
+    fn press_enter(&mut self) -> Result<()> {
+        self.enter_pressed = true;
+        Ok(())
+    }
+
+    fn press_key(&mut self, _keycode: u16) -> Result<()> {
+        // Mock implementation - could log the keycode if needed
+        Ok(())
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Mock VirtualKeyboard for testing without requiring actual hardware
-    struct MockVirtualKeyboard {
-        current_text: String,
-        typed_chars: Vec<char>,
-        backspace_count: usize,
-        enter_pressed: bool,
-    }
-
-    impl MockVirtualKeyboard {
-        fn new() -> Self {
-            Self {
-                current_text: String::new(),
-                typed_chars: Vec::new(),
-                backspace_count: 0,
-                enter_pressed: false,
-            }
-        }
-
-        fn type_text(&mut self, text: &str) -> Result<()> {
-            for c in text.chars() {
-                self.typed_chars.push(c);
-            }
-            Ok(())
-        }
-
-        fn press_backspace(&mut self) -> Result<()> {
-            self.backspace_count += 1;
-            if !self.typed_chars.is_empty() {
-                self.typed_chars.pop();
-            }
-            Ok(())
-        }
-
-        fn press_enter(&mut self) -> Result<()> {
-            self.enter_pressed = true;
-            Ok(())
-        }
-
-        fn update_transcript(&mut self, new_transcript: &str) -> Result<()> {
-            debug!(
-                "Updating transcript from '{}' to '{}'",
-                self.current_text, new_transcript
-            );
-
-            // If the new transcript is empty, clear everything
-            if new_transcript.is_empty() {
-                self.clear_current_text()?;
-                return Ok(());
-            }
-
-            // Check if the new transcript is just an extension of the current one
-            if new_transcript.starts_with(&self.current_text) {
-                // Just type the new characters
-                let new_chars = &new_transcript[self.current_text.len()..];
-                if !new_chars.is_empty() {
-                    debug!("Typing new characters: '{}'", new_chars);
-                    self.type_text(new_chars)?;
-                    self.current_text = new_transcript.to_string();
-                }
-            } else {
-                // Find the common prefix between current and new transcript
-                let common_prefix_len = self
-                    .current_text
-                    .chars()
-                    .zip(new_transcript.chars())
-                    .take_while(|(a, b)| a == b)
-                    .count();
-
-                let current_chars: Vec<char> = self.current_text.chars().collect();
-                let chars_to_backspace = current_chars.len() - common_prefix_len;
-
-                debug!(
-                    "Common prefix length: {}, need to backspace {} characters",
-                    common_prefix_len, chars_to_backspace
-                );
-
-                // Only backspace the characters that differ
-                if chars_to_backspace > 0 {
-                    debug!("Backspacing {} characters", chars_to_backspace);
-                    for _ in 0..chars_to_backspace {
-                        self.press_backspace()?;
-                    }
-                }
-
-                // Type the new ending (everything after the common prefix)
-                let new_chars: Vec<char> = new_transcript.chars().collect();
-                if common_prefix_len < new_chars.len() {
-                    let new_ending: String = new_chars[common_prefix_len..].iter().collect();
-                    debug!("Typing new ending: '{}'", new_ending);
-                    self.type_text(&new_ending)?;
-                }
-
-                self.current_text = new_transcript.to_string();
-            }
-
-            Ok(())
-        }
-
-        fn finalize_transcript(&mut self) -> Result<()> {
-            debug!("Finalizing transcript: '{}'", self.current_text);
-
-            // Regex to match "enter" (case-insensitive) at the end, optionally followed by
-            // punctuation and/or whitespace: (?i)\s*enter[[:punct:]\s]*$
-            // (?i) = case insensitive
-            // \s* = optional leading whitespace
-            // enter = the word "enter"
-            // [[:punct:]\s]* = optional trailing punctuation or whitespace
-            // $ = end of string
-            let enter_regex = Regex::new(r"(?i)\s*\benter\b[[:punct:]\s]*$").unwrap();
-
-            // Find the match and extract the information we need before mutating self
-            let match_info = enter_regex.find(&self.current_text).map(|m| {
-                (
-                    m.start(),
-                    m.as_str().chars().count(),
-                    m.as_str().to_string(),
-                )
-            });
-
-            if let Some((start_pos, chars_to_backspace, matched_str)) = match_info {
-                debug!(
-                    "Found 'enter' command at end of transcript: '{}'",
-                    matched_str
-                );
-                debug!(
-                    "Backspacing {} characters for 'enter' command",
-                    chars_to_backspace
-                );
-
-                // Backspace the matched portion
-                for _ in 0..chars_to_backspace {
-                    self.press_backspace()?;
-                    // Small delay between backspaces for reliability
-                    std::thread::sleep(std::time::Duration::from_millis(5));
-                }
-
-                // Update our internal tracking to remove the backspaced characters
-                self.current_text = self.current_text[..start_pos].to_string();
-
-                // Press the actual ENTER key
-                debug!("Pressing ENTER key");
-                self.press_enter()?;
-            }
-
-            // Clear the current text tracking
-            self.current_text.clear();
-
-            Ok(())
-        }
-
-        fn clear_current_text(&mut self) -> Result<()> {
-            if !self.current_text.is_empty() {
-                self.backspace_current_text()?;
-            }
-            Ok(())
-        }
-
-        fn backspace_current_text(&mut self) -> Result<()> {
-            let char_count = self.current_text.chars().count();
-            debug!("Backspacing {} characters", char_count);
-
-            for _ in 0..char_count {
-                self.press_backspace()?;
-            }
-
-            self.current_text.clear();
-            Ok(())
-        }
-    }
-
     #[test]
     fn test_incremental_typing_extension() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Start with "hello"
         kb.update_transcript("hello").unwrap();
         assert_eq!(kb.current_text, "hello");
-        assert_eq!(kb.typed_chars, ['h', 'e', 'l', 'l', 'o']);
-        assert_eq!(kb.backspace_count, 0);
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o']);
+        assert_eq!(kb.hardware.backspace_count, 0);
 
         // Extend to "hello world"
         kb.update_transcript("hello world").unwrap();
         assert_eq!(kb.current_text, "hello world");
         assert_eq!(
-            kb.typed_chars,
+            kb.hardware.typed_chars,
             ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd']
         );
-        assert_eq!(kb.backspace_count, 0);
+        assert_eq!(kb.hardware.backspace_count, 0);
     }
 
     #[test]
     fn test_incremental_typing_change() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Start with "hello"
         kb.update_transcript("hello").unwrap();
         assert_eq!(kb.current_text, "hello");
-        assert_eq!(kb.typed_chars, ['h', 'e', 'l', 'l', 'o']);
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o']);
 
         // Change to "hi there" - should only backspace "ello" and type "i there"
         kb.update_transcript("hi there").unwrap();
         assert_eq!(kb.current_text, "hi there");
         // Should have backspaced 4 characters ("ello") and typed 7 new ones ("i there")
-        assert_eq!(kb.backspace_count, 4);
-        assert_eq!(kb.typed_chars, ['h', 'i', ' ', 't', 'h', 'e', 'r', 'e']);
+        assert_eq!(kb.hardware.backspace_count, 4);
+        assert_eq!(
+            kb.hardware.typed_chars,
+            ['h', 'i', ' ', 't', 'h', 'e', 'r', 'e']
+        );
     }
 
     #[test]
     fn test_finalize_transcript() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Type some text
         kb.update_transcript("hello").unwrap();
         assert_eq!(kb.current_text, "hello");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
 
         // Finalize (should not press enter anymore)
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(!kb.enter_pressed); // Should remain false
+        assert!(!kb.hardware.enter_pressed); // Should remain false
     }
 
     #[test]
     fn test_empty_transcript() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Start with some text
         kb.update_transcript("hello").unwrap();
@@ -632,18 +492,18 @@ mod tests {
         // Clear with empty transcript
         kb.update_transcript("").unwrap();
         assert_eq!(kb.current_text, "");
-        assert_eq!(kb.backspace_count, 5);
+        assert_eq!(kb.hardware.backspace_count, 5);
     }
 
     #[test]
     fn test_smart_backspacing_partial_change() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Start with "hello world"
         kb.update_transcript("hello world").unwrap();
         assert_eq!(kb.current_text, "hello world");
         assert_eq!(
-            kb.typed_chars,
+            kb.hardware.typed_chars,
             ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd']
         );
 
@@ -651,16 +511,16 @@ mod tests {
         kb.update_transcript("hello there").unwrap();
         assert_eq!(kb.current_text, "hello there");
         // Should have backspaced 5 characters ("world") and typed 5 new ones ("there")
-        assert_eq!(kb.backspace_count, 5);
+        assert_eq!(kb.hardware.backspace_count, 5);
         assert_eq!(
-            kb.typed_chars,
+            kb.hardware.typed_chars,
             ['h', 'e', 'l', 'l', 'o', ' ', 't', 'h', 'e', 'r', 'e']
         );
     }
 
     #[test]
     fn test_smart_backspacing_no_common_prefix() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Start with "hello"
         kb.update_transcript("hello").unwrap();
@@ -670,13 +530,13 @@ mod tests {
         kb.update_transcript("goodbye").unwrap();
         assert_eq!(kb.current_text, "goodbye");
         // Should have backspaced 5 characters and typed 7 new ones
-        assert_eq!(kb.backspace_count, 5);
-        assert_eq!(kb.typed_chars, ['g', 'o', 'o', 'd', 'b', 'y', 'e']);
+        assert_eq!(kb.hardware.backspace_count, 5);
+        assert_eq!(kb.hardware.typed_chars, ['g', 'o', 'o', 'd', 'b', 'y', 'e']);
     }
 
     #[test]
     fn test_smart_backspacing_shortening() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Start with "hello world"
         kb.update_transcript("hello world").unwrap();
@@ -686,93 +546,93 @@ mod tests {
         kb.update_transcript("hello").unwrap();
         assert_eq!(kb.current_text, "hello");
         // Should have backspaced 6 characters (" world") and typed 0 new ones
-        assert_eq!(kb.backspace_count, 6);
-        assert_eq!(kb.typed_chars, ['h', 'e', 'l', 'l', 'o']);
+        assert_eq!(kb.hardware.backspace_count, 6);
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o']);
     }
 
     #[test]
     fn test_finalize_with_enter_command() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Type text ending with "enter"
         kb.update_transcript("Write a unit test enter").unwrap();
         assert_eq!(kb.current_text, "Write a unit test enter");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
 
         // Finalize - should backspace "enter" and press ENTER key
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(kb.enter_pressed);
+        assert!(kb.hardware.enter_pressed);
         // Should have backspaced 6 characters (" enter")
-        assert_eq!(kb.backspace_count, 6);
+        assert_eq!(kb.hardware.backspace_count, 6);
     }
 
     #[test]
     fn test_finalize_with_enter_only() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Type only "enter"
         kb.update_transcript("enter").unwrap();
         assert_eq!(kb.current_text, "enter");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
 
         // Finalize - should backspace all and press ENTER key
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(kb.enter_pressed);
+        assert!(kb.hardware.enter_pressed);
         // Should have backspaced 5 characters ("enter")
-        assert_eq!(kb.backspace_count, 5);
+        assert_eq!(kb.hardware.backspace_count, 5);
     }
 
     #[test]
     fn test_finalize_with_enter_case_insensitive() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Type text ending with "ENTER" (uppercase)
         kb.update_transcript("hello ENTER").unwrap();
         assert_eq!(kb.current_text, "hello ENTER");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
 
         // Finalize - should still recognize and handle it
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(kb.enter_pressed);
+        assert!(kb.hardware.enter_pressed);
         // Should have backspaced 6 characters (" ENTER")
-        assert_eq!(kb.backspace_count, 6);
+        assert_eq!(kb.hardware.backspace_count, 6);
     }
 
     #[test]
     fn test_finalize_without_enter_command() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Type text not ending with "enter"
         kb.update_transcript("hello world").unwrap();
         assert_eq!(kb.current_text, "hello world");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
 
         // Finalize - should not press ENTER key
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
         // Should not have backspaced anything for the enter command
-        assert_eq!(kb.backspace_count, 0);
+        assert_eq!(kb.hardware.backspace_count, 0);
     }
 
     #[test]
     fn test_finalize_with_enter_in_middle() {
-        let mut kb = MockVirtualKeyboard::new();
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
 
         // Type text with "enter" in the middle, not at the end
         kb.update_transcript("enter the room").unwrap();
         assert_eq!(kb.current_text, "enter the room");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
 
         // Finalize - should not press ENTER key since "enter" is not the last word
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(!kb.enter_pressed);
+        assert!(!kb.hardware.enter_pressed);
         // Should not have backspaced anything for the enter command
-        assert_eq!(kb.backspace_count, 0);
+        assert_eq!(kb.hardware.backspace_count, 0);
     }
 
     #[test]
@@ -787,15 +647,19 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = MockVirtualKeyboard::new();
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
             if should_trigger {
-                assert!(kb.enter_pressed, "Should trigger ENTER for: '{}'", input);
+                assert!(
+                    kb.hardware.enter_pressed,
+                    "Should trigger ENTER for: '{}'",
+                    input
+                );
             } else {
                 assert!(
-                    !kb.enter_pressed,
+                    !kb.hardware.enter_pressed,
                     "Should NOT trigger ENTER for: '{}'",
                     input
                 );
@@ -818,15 +682,19 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = MockVirtualKeyboard::new();
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
             if should_trigger {
-                assert!(kb.enter_pressed, "Should trigger ENTER for: '{}'", input);
+                assert!(
+                    kb.hardware.enter_pressed,
+                    "Should trigger ENTER for: '{}'",
+                    input
+                );
             } else {
                 assert!(
-                    !kb.enter_pressed,
+                    !kb.hardware.enter_pressed,
                     "Should NOT trigger ENTER for: '{}'",
                     input
                 );
@@ -850,15 +718,19 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = MockVirtualKeyboard::new();
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
             if should_trigger {
-                assert!(kb.enter_pressed, "Should trigger ENTER for: '{}'", input);
+                assert!(
+                    kb.hardware.enter_pressed,
+                    "Should trigger ENTER for: '{}'",
+                    input
+                );
             } else {
                 assert!(
-                    !kb.enter_pressed,
+                    !kb.hardware.enter_pressed,
                     "Should NOT trigger ENTER for: '{}'",
                     input
                 );
@@ -876,15 +748,19 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = MockVirtualKeyboard::new();
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
             if should_trigger {
-                assert!(kb.enter_pressed, "Should trigger ENTER for: '{}'", input);
+                assert!(
+                    kb.hardware.enter_pressed,
+                    "Should trigger ENTER for: '{}'",
+                    input
+                );
             } else {
                 assert!(
-                    !kb.enter_pressed,
+                    !kb.hardware.enter_pressed,
                     "Should NOT trigger ENTER for: '{}'",
                     input
                 );
@@ -906,15 +782,19 @@ mod tests {
         ];
 
         for (input, should_trigger) in test_cases {
-            let mut kb = MockVirtualKeyboard::new();
+            let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
             kb.update_transcript(input).unwrap();
             kb.finalize_transcript().unwrap();
 
             if should_trigger {
-                assert!(kb.enter_pressed, "Should trigger ENTER for: '{}'", input);
+                assert!(
+                    kb.hardware.enter_pressed,
+                    "Should trigger ENTER for: '{}'",
+                    input
+                );
             } else {
                 assert!(
-                    !kb.enter_pressed,
+                    !kb.hardware.enter_pressed,
                     "Should NOT trigger ENTER for: '{}'",
                     input
                 );
