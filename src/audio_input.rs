@@ -57,7 +57,7 @@ impl AudioInput {
                 }
             })
             .next()
-            .context(format!("Device '{}' not found", device_name))?;
+            .context(format!("Device '{device_name}' not found"))?;
 
         debug!("Using input device: {}", device.name()?);
 

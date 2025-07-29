@@ -58,7 +58,7 @@ impl RealKeyboardHardware {
         for keycode in keycodes {
             unsafe {
                 ui_set_keybit(fd, keycode as u64)
-                    .context(format!("Failed to enable key code {}", keycode))?;
+                    .context(format!("Failed to enable key code {keycode}"))?;
             }
         }
 

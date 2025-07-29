@@ -274,7 +274,7 @@ where
 {
     // Ensure URL ends with a slash
     let stt_url = if !stt_url.ends_with('/') {
-        format!("{}/", stt_url)
+        format!("{stt_url}/")
     } else {
         stt_url.to_string()
     };

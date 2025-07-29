@@ -112,7 +112,7 @@ impl SttClient {
                                     let preview = if data.len() > 10 {
                                         format!("{:?}...", &data[..10])
                                     } else {
-                                        format!("{:?}", data)
+                                        format!("{data:?}")
                                     };
                                     debug!("Received binary message: {} bytes (not UTF-8 text, UTF-8 error: {}, preview: {})", 
                                           data.len(), e, preview);

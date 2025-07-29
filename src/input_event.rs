@@ -161,6 +161,7 @@ impl UInputSetup {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 pub struct InputId {
     pub bustype: u16,
     pub vendor: u16,
@@ -168,16 +169,6 @@ pub struct InputId {
     pub version: u16,
 }
 
-impl Default for InputId {
-    fn default() -> Self {
-        Self {
-            bustype: 0,
-            vendor: 0,
-            product: 0,
-            version: 0,
-        }
-    }
-}
 
 // Character to key code mapping
 pub fn char_to_keycode(c: char) -> Option<(u16, bool)> {
