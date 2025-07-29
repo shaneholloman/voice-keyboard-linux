@@ -4,7 +4,6 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, warn};
-use std::time::Duration;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordInfo {
@@ -98,7 +97,7 @@ impl SttClient {
                             match String::from_utf8(data.clone()) {
                                 Ok(text) => {
                                     debug!("Received binary message as text: {}", text);
-                                    
+
                                     match serde_json::from_str::<TranscriptionResult>(&text) {
                                         Ok(result) => {
                                             on_transcription(result);
@@ -161,8 +160,10 @@ impl AudioBuffer {
         // chunk_size = sample_rate * (chunk_duration_ms / 1000) * 2 bytes per sample
         let chunk_size = (sample_rate * chunk_duration_ms / 1000 * 2) as usize;
 
-        debug!("AudioBuffer: sample_rate={}, chunk_duration_ms={}, calculated chunk_size={} bytes", 
-              sample_rate, chunk_duration_ms, chunk_size);
+        debug!(
+            "AudioBuffer: sample_rate={}, chunk_duration_ms={}, calculated chunk_size={} bytes",
+            sample_rate, chunk_duration_ms, chunk_size
+        );
 
         Self {
             buffer: Vec::new(),
@@ -190,8 +191,13 @@ impl AudioBuffer {
         }
 
         if !chunks.is_empty() {
-            debug!("Created {} audio chunks of {} bytes each (buffer size: {}, chunk_size: {})", 
-                  chunks.len(), chunks[0].len(), self.buffer.len(), self.chunk_size);
+            debug!(
+                "Created {} audio chunks of {} bytes each (buffer size: {}, chunk_size: {})",
+                chunks.len(),
+                chunks[0].len(),
+                self.buffer.len(),
+                self.chunk_size
+            );
         }
 
         chunks

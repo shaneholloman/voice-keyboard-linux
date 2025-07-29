@@ -1706,6 +1706,7 @@ dependencies = [
  "futures-util",
  "libc",
  "nix",
+ "regex",
  "serde",
  "serde_json",
  "tokio",

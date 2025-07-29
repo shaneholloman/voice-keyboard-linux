@@ -223,18 +223,18 @@ async fn test_audio() -> Result<()> {
 
 async fn test_stt(keyboard: VirtualKeyboard, stt_url: &str) -> Result<()> {
     info!("Testing speech-to-text functionality...");
-    
+
     // Wrap keyboard in a mutex to allow mutable access from the closure
     let keyboard = std::sync::Arc::new(std::sync::Mutex::new(keyboard));
     let keyboard_clone = keyboard.clone();
-    
+
     run_stt(stt_url, move |result| {
         if !result.transcript.is_empty() {
             info!("Transcription [{}]: {}", result.event, result.transcript);
         }
-        
+
         let mut kb = keyboard_clone.lock().unwrap();
-        
+
         // Handle different event types
         match result.event.as_str() {
             "EndOfTurn" => {
@@ -250,7 +250,8 @@ async fn test_stt(keyboard: VirtualKeyboard, stt_url: &str) -> Result<()> {
                 }
             }
         }
-    }).await
+    })
+    .await
 }
 
 async fn debug_stt(stt_url: &str) -> Result<()> {
