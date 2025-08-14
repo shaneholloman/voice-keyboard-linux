@@ -38,6 +38,7 @@ impl AudioInput {
         })
     }
 
+    #[cfg(false)]
     #[allow(dead_code)]
     pub fn new_with_device_name(device_name: &str) -> Result<Self> {
         let host = cpal::default_host();

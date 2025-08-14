@@ -1,9 +1,12 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, warn};
+use http::{HeaderValue, header::AUTHORIZATION};
+use std::env;
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordInfo {
@@ -44,13 +47,38 @@ impl SttClient {
     {
         // Build WebSocket URL with query parameters
         let ws_url = format!(
-            "{}?sample_rate={}&preflight_threshold=0.8&eot_threshold=0.7&eot_timeout_ms=3000",
+            "{}?model=flux-general-en&sample_rate={}",
             self.url, self.sample_rate
         );
 
         debug!("Connecting to speech-to-text service: {}", ws_url);
 
-        let (ws_stream, _) = connect_async(&ws_url)
+        // Build request (allows setting headers)
+        let mut request = ws_url
+            .into_client_request()
+            .context("Failed to build websocket client request")?;
+
+        // Optional Authorization from environment
+        if let Ok(api_key) = env::var("DEEPGRAM_API_KEY") {
+            if !api_key.is_empty() {
+                let value = format!("Token {api_key}");
+                match HeaderValue::from_str(&value) {
+                    Ok(hv) => {
+                        request.headers_mut().insert(AUTHORIZATION, hv);
+                        debug!("Added Authorization header from DEEPGRAM_API_KEY");
+                    }
+                    Err(_) => {
+                        // Treat invalid header as fatal
+                        bail!("Invalid Authorization header value constructed from DEEPGRAM_API_KEY");
+                    }
+                }
+            }
+        } else {
+            debug!("DEEPGRAM_API_KEY not set; connecting without Authorization header");
+        }
+
+        // Establish WebSocket connection with the request
+        let (ws_stream, _) = connect_async(request)
             .await
             .context("Failed to connect to WebSocket")?;
 
@@ -63,20 +91,21 @@ impl SttClient {
 
         // Spawn task to handle WebSocket communication
         let handle = tokio::spawn(async move {
-            // Task to send audio data
+            // Task to send audio data (fatal on send error)
             let send_task = tokio::spawn(async move {
                 while let Some(audio_data) = audio_rx.recv().await {
                     if let Err(e) = ws_sender.send(Message::Binary(audio_data)).await {
                         error!("Failed to send audio data: {}", e);
-                        break;
+                        return Err(anyhow!("failed to send audio over websocket: {e}"));
                     }
                 }
 
                 // Close the WebSocket when done
                 let _ = ws_sender.close().await;
+                Ok::<(), anyhow::Error>(())
             });
 
-            // Task to receive transcription results
+            // Task to receive transcription results (fatal on parse/socket error)
             let receive_task = tokio::spawn(async move {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
@@ -88,58 +117,30 @@ impl SttClient {
                                     on_transcription(result);
                                 }
                                 Err(e) => {
-                                    warn!("Failed to parse transcription result: {}", e);
+                                    error!("Failed to parse transcription result: {} in {}", e, text);
+                                    return Err(anyhow!("invalid transcription JSON: {e}"));
                                 }
                             }
                         }
-                        Ok(Message::Binary(data)) => {
-                            // Try to parse binary data as UTF-8 text first (for JSON responses)
-                            match String::from_utf8(data.clone()) {
-                                Ok(text) => {
-                                    debug!("Received binary message as text: {}", text);
-
-                                    match serde_json::from_str::<TranscriptionResult>(&text) {
-                                        Ok(result) => {
-                                            on_transcription(result);
-                                        }
-                                        Err(e) => {
-                                            warn!("Failed to parse binary message as JSON: {}", e);
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    // Show first few bytes for debugging
-                                    let preview = if data.len() > 10 {
-                                        format!("{:?}...", &data[..10])
-                                    } else {
-                                        format!("{data:?}")
-                                    };
-                                    debug!("Received binary message: {} bytes (not UTF-8 text, UTF-8 error: {}, preview: {})", 
-                                          data.len(), e, preview);
-                                }
-                            }
-                        }
+                        Ok(Message::Binary(_data)) => return Err(anyhow!("received binary data--this isn't expected")),
                         Ok(Message::Close(_)) => {
                             debug!("WebSocket closed by server");
                             break;
                         }
                         Err(e) => {
                             error!("WebSocket error: {}", e);
-                            break;
+                            return Err(anyhow!("websocket receive error: {e}"));
                         }
                         _ => {}
                     }
                 }
+                Ok::<(), anyhow::Error>(())
             });
 
-            // Wait for either task to complete
+            // Wait for either task to complete and propagate failure
             tokio::select! {
-                _ = send_task => {
-                    debug!("Audio sending task completed");
-                }
-                _ = receive_task => {
-                    debug!("Transcription receiving task completed");
-                }
+                res = send_task => { res??; }
+                res = receive_task => { res??; }
             }
 
             Ok(())

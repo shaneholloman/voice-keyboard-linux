@@ -16,7 +16,7 @@ use audio_input::AudioInput;
 use stt_client::{AudioBuffer, SttClient};
 use virtual_keyboard::{RealKeyboardHardware, VirtualKeyboard};
 
-const DEEPGRAM_STT_URL: &str = "wss://river.sandbox.deepgram.com";
+const DEEPGRAM_STT_URL: &str = "wss://api.preview.deepgram.com/v2/listen";
 
 #[derive(Debug)]
 struct OriginalUser {
@@ -239,15 +239,17 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str
         // Handle different event types
         match result.event.as_str() {
             "EndOfTurn" => {
-                // Finalize the transcript and press enter
+                // Finalize the transcript; treat failure as fatal
                 if let Err(e) = kb.finalize_transcript() {
                     error!("Failed to finalize transcript: {}", e);
+                    std::process::exit(1);
                 }
             }
             _ => {
-                // Handle incremental updates for all other events
+                // Handle incremental updates; treat failure as fatal
                 if let Err(e) = kb.update_transcript(&result.transcript) {
                     error!("Failed to update transcript: {}", e);
+                    std::process::exit(1);
                 }
             }
         }
@@ -272,13 +274,6 @@ async fn run_stt<F>(stt_url: &str, on_transcription: F) -> Result<()>
 where
     F: Fn(stt_client::TranscriptionResult) + Send + 'static,
 {
-    // Ensure URL ends with a slash
-    let stt_url = if !stt_url.ends_with('/') {
-        format!("{stt_url}/")
-    } else {
-        stt_url.to_string()
-    };
-
     let mut audio_input = AudioInput::new()?;
     debug!(
         "Using audio device with {} channels at {} Hz",
@@ -287,7 +282,7 @@ where
     );
 
     let mut audio_buffer = AudioBuffer::new(audio_input.get_sample_rate(), 160);
-    let stt_client = SttClient::new(&stt_url, audio_input.get_sample_rate());
+    let stt_client = SttClient::new(stt_url, audio_input.get_sample_rate());
 
     let (audio_tx, handle) = stt_client
         .connect_and_transcribe(on_transcription)
