@@ -147,5 +147,5 @@ src/
 
 ## License
 
-[Add your license here]
+ISC License. See LICENSE.txt
 
