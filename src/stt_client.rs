@@ -1,12 +1,14 @@
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{anyhow, bail, Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use http::{header::AUTHORIZATION, HeaderValue};
 use serde::{Deserialize, Serialize};
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
-use tracing::{debug, error, warn};
-use http::{HeaderValue, header::AUTHORIZATION};
 use std::env;
+use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tracing::{debug, error, info};
+
+pub const STT_URL: &str = "wss://api.preview.deepgram.com/v2/listen";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordInfo {
@@ -23,6 +25,40 @@ pub struct TranscriptionResult {
     pub transcript: String,
     pub words: Vec<WordInfo>,
     pub end_of_turn_confidence: f64,
+}
+
+// New server message schema with `type` discriminator
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "type")]
+#[allow(dead_code)]
+enum ServerMessage {
+    Connected {
+        request_id: String,
+        sequence_id: u32,
+    },
+    TurnInfo {
+        request_id: String,
+        sequence_id: u32,
+        event: String,
+        turn_index: u32,
+        audio_window_start: f64,
+        audio_window_end: f64,
+        transcript: String,
+        words: Vec<WordInfo>,
+        end_of_turn_confidence: f64,
+    },
+    Error {
+        sequence_id: u32,
+        code: String,
+        description: String,
+    },
+    // Configuration ack/echo; fields are optional or not used here
+    Configuration {
+        #[serde(default)]
+        eot_threshold: Option<f64>,
+        #[serde(default)]
+        preflight_threshold: Option<f64>,
+    },
 }
 
 pub struct SttClient {
@@ -69,7 +105,9 @@ impl SttClient {
                     }
                     Err(_) => {
                         // Treat invalid header as fatal
-                        bail!("Invalid Authorization header value constructed from DEEPGRAM_API_KEY");
+                        bail!(
+                            "Invalid Authorization header value constructed from DEEPGRAM_API_KEY"
+                        );
                     }
                 }
             }
@@ -100,29 +138,91 @@ impl SttClient {
                     }
                 }
 
-                // Close the WebSocket when done
-                let _ = ws_sender.close().await;
+                // Audio channel closed: inform server no more audio is coming
+                let close_msg = String::from("{\"type\":\"CloseStream\"}");
+                debug!("Sending CloseStream control message");
+                ws_sender
+                    .send(Message::Text(close_msg))
+                    .await
+                    .map_err(|e| anyhow!("failed to send CloseStream: {e}"))?;
+
+                // Do not close the socket from client; server will close after sending responses
                 Ok::<(), anyhow::Error>(())
             });
 
-            // Task to receive transcription results (fatal on parse/socket error)
+            // Task to receive messages (fatal on parse/socket error per policy)
             let receive_task = tokio::spawn(async move {
                 while let Some(msg) = ws_receiver.next().await {
                     match msg {
                         Ok(Message::Text(text)) => {
                             debug!("Received text message: {}", text);
 
-                            match serde_json::from_str::<TranscriptionResult>(&text) {
-                                Ok(result) => {
-                                    on_transcription(result);
-                                }
+                            // Parse by `type`
+                            let parsed: ServerMessage = match serde_json::from_str(&text) {
+                                Ok(m) => m,
                                 Err(e) => {
-                                    error!("Failed to parse transcription result: {} in {}", e, text);
-                                    return Err(anyhow!("invalid transcription JSON: {e}"));
+                                    error!("Failed to parse message JSON: {} in {}", e, text);
+                                    return Err(anyhow!("invalid server JSON: {e}"));
+                                }
+                            };
+
+                            match parsed {
+                                ServerMessage::Connected {
+                                    request_id,
+                                    sequence_id,
+                                } => {
+                                    info!(
+                                        "Connected: request_id={}, sequence_id={}",
+                                        request_id, sequence_id
+                                    );
+                                }
+                                ServerMessage::Configuration {
+                                    eot_threshold,
+                                    preflight_threshold,
+                                } => {
+                                    info!("Configuration ack: eot_threshold={:?}, preflight_threshold={:?}", eot_threshold, preflight_threshold);
+                                }
+                                ServerMessage::Error {
+                                    sequence_id,
+                                    code,
+                                    description,
+                                } => {
+                                    error!("Server error [{}]: {}", code, description);
+                                    return Err(anyhow!(
+                                        "server error (seq {}): {} - {}",
+                                        sequence_id,
+                                        code,
+                                        description
+                                    ));
+                                }
+                                ServerMessage::TurnInfo {
+                                    request_id: _,
+                                    sequence_id: _,
+                                    event,
+                                    turn_index,
+                                    audio_window_start,
+                                    audio_window_end,
+                                    transcript,
+                                    words,
+                                    end_of_turn_confidence,
+                                } => {
+                                    // Map to callback struct
+                                    let result = TranscriptionResult {
+                                        event,
+                                        turn_index,
+                                        start: audio_window_start,
+                                        timestamp: audio_window_end,
+                                        transcript,
+                                        words,
+                                        end_of_turn_confidence,
+                                    };
+                                    on_transcription(result);
                                 }
                             }
                         }
-                        Ok(Message::Binary(_data)) => return Err(anyhow!("received binary data--this isn't expected")),
+                        Ok(Message::Binary(_data)) => {
+                            return Err(anyhow!("received binary data--this isn't expected"))
+                        }
                         Ok(Message::Close(_)) => {
                             debug!("WebSocket closed by server");
                             break;
@@ -137,11 +237,8 @@ impl SttClient {
                 Ok::<(), anyhow::Error>(())
             });
 
-            // Wait for either task to complete and propagate failure
-            tokio::select! {
-                res = send_task => { res??; }
-                res = receive_task => { res??; }
-            }
+            // Wait for both tasks to finish
+            let (_sr, _rr) = tokio::try_join!(send_task, receive_task)?;
 
             Ok(())
         });
@@ -212,5 +309,123 @@ impl AudioBuffer {
         } else {
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+    use std::time::Duration;
+
+    fn init_tracing() {
+        let _ = tracing_subscriber::fmt::try_init();
+    }
+
+    #[tokio::test]
+    async fn test_connect_and_receive_turninfo_with_silence() {
+        init_tracing();
+        // Allow overriding URL via env; default to the new preview endpoint the app uses
+        let stt_url = std::env::var("STT_TEST_URL").unwrap_or_else(|_| STT_URL.to_string());
+        let sample_rate: u32 = 16_000;
+
+        let client = SttClient::new(&stt_url, sample_rate);
+
+        // Flag flipped when we successfully deserialize a TurnInfo and invoke callback
+        let got_result = Arc::new(AtomicBool::new(false));
+        let got_result_clone = got_result.clone();
+
+        let (audio_tx, _handle) = client
+            .connect_and_transcribe(move |_result| {
+                // We only need to know that deserialization worked and callback fired
+                got_result_clone.store(true, Ordering::SeqCst);
+            })
+            .await
+            .expect("failed to connect to STT service");
+
+        // Stream silence in 80 ms chunks at real-time rate until we get a result (with max duration)
+        let chunk_ms: u32 = 80;
+        let samples_per_chunk: usize = (sample_rate as usize * chunk_ms as usize) / 1000; // 16k * 80ms = 1280
+        let bytes_per_chunk: usize = samples_per_chunk * 2; // PCM16
+        let zeros = vec![0u8; bytes_per_chunk];
+
+        // Safety timeout so we don't hang CI forever
+        let stream_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let mut audio_tx = Some(audio_tx);
+        loop {
+            if got_result.load(Ordering::SeqCst) {
+                break;
+            }
+            if tokio::time::Instant::now() > stream_deadline {
+                break;
+            }
+
+            if let Some(tx) = &audio_tx {
+                tx.send(zeros.clone()).await.expect("audio send failed");
+            }
+            tokio::time::sleep(Duration::from_millis(chunk_ms as u64)).await;
+        }
+
+        // Drop the sender to signal end-of-audio; client will send CloseStream and await server close
+        if let Some(tx) = audio_tx.take() {
+            drop(tx);
+        }
+
+        assert!(
+            got_result.load(Ordering::SeqCst),
+            "timed out waiting for transcription result"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_stream_silence_until_response() {
+        init_tracing();
+        // Allow overriding URL via env; default to the new preview endpoint the app uses
+        let stt_url = std::env::var("STT_TEST_URL").unwrap_or_else(|_| STT_URL.to_string());
+        let sample_rate: u32 = 16_000;
+
+        let client = SttClient::new(&stt_url, sample_rate);
+
+        // Flag flipped when we successfully deserialize a TurnInfo and invoke callback
+        let got_result = Arc::new(AtomicBool::new(false));
+        let got_result_clone = got_result.clone();
+
+        let (audio_tx, _handle) = client
+            .connect_and_transcribe(move |_result| {
+                got_result_clone.store(true, Ordering::SeqCst);
+            })
+            .await
+            .expect("failed to connect to STT service");
+
+        // Stream silence continuously in 80 ms chunks at real-time rate until we get a result
+        let chunk_ms: u32 = 80;
+        let samples_per_chunk: usize = (sample_rate as usize * chunk_ms as usize) / 1000; // 1280 samples
+        let bytes_per_chunk: usize = samples_per_chunk * 2; // PCM16
+        let zeros = vec![0u8; bytes_per_chunk];
+
+        // Max stream duration to avoid hanging the test forever
+        let stream_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        let audio_tx = Some(audio_tx);
+        loop {
+            if got_result.load(Ordering::SeqCst) {
+                break;
+            }
+            if tokio::time::Instant::now() > stream_deadline {
+                break;
+            }
+
+            if let Some(tx) = &audio_tx {
+                tx.send(zeros.clone()).await.expect("audio send failed");
+            }
+            tokio::time::sleep(Duration::from_millis(chunk_ms as u64)).await;
+        }
+
+        assert!(
+            got_result.load(Ordering::SeqCst),
+            "did not receive any TurnInfo within the allowed time"
+        );
     }
 }

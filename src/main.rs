@@ -16,8 +16,6 @@ use audio_input::AudioInput;
 use stt_client::{AudioBuffer, SttClient};
 use virtual_keyboard::{RealKeyboardHardware, VirtualKeyboard};
 
-const DEEPGRAM_STT_URL: &str = "wss://api.preview.deepgram.com/v2/listen";
-
 #[derive(Debug)]
 struct OriginalUser {
     uid: Uid,
@@ -161,14 +159,14 @@ async fn main() -> Result<()> {
         let stt_url = matches
             .get_one::<String>("stt-url")
             .map(|s| s.as_str())
-            .unwrap_or(DEEPGRAM_STT_URL);
+            .unwrap_or(stt_client::STT_URL);
         test_stt(keyboard, stt_url).await?;
     } else {
         let debug_mode = matches.get_flag("debug-stt");
         let stt_url = matches
             .get_one::<String>("stt-url")
             .map(|s| s.as_str())
-            .unwrap_or(DEEPGRAM_STT_URL);
+            .unwrap_or(stt_client::STT_URL);
 
         if debug_mode {
             debug_stt(stt_url).await?;

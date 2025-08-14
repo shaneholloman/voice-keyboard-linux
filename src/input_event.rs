@@ -160,15 +160,13 @@ impl UInputSetup {
 }
 
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
-#[derive(Default)]
+#[derive(Debug, Clone, Copy, Default)]
 pub struct InputId {
     pub bustype: u16,
     pub vendor: u16,
     pub product: u16,
     pub version: u16,
 }
-
 
 // Character to key code mapping
 pub fn char_to_keycode(c: char) -> Option<(u16, bool)> {
