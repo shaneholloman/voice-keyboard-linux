@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::env;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+use tokio_tungstenite::tungstenite::error::Error as WsError;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info};
 
@@ -48,9 +49,12 @@ enum ServerMessage {
         end_of_turn_confidence: f64,
     },
     Error {
-        sequence_id: u32,
+        #[serde(default)]
+        sequence_id: Option<u32>,
         code: String,
         description: String,
+        #[serde(default)]
+        websocket_close_code: Option<u16>,
     },
     // Configuration ack/echo; fields are optional or not used here
     Configuration {
@@ -59,6 +63,43 @@ enum ServerMessage {
         #[serde(default)]
         preflight_threshold: Option<f64>,
     },
+}
+
+fn enrich_ws_error(err: WsError) -> anyhow::Error {
+    match err {
+        WsError::Http(resp) => {
+            let (parts, body_opt) = resp.into_parts();
+            let status = parts.status;
+            let headers = parts.headers;
+            let mut header_lines = String::new();
+            for (k, v) in headers.iter() {
+                // Limit very long values
+                let val = v.to_str().unwrap_or("<binary>");
+                let shortened = if val.len() > 256 { &val[..256] } else { val };
+                header_lines.push_str(&format!("\n  {}: {}", k, shortened));
+            }
+            let body_text = body_opt
+                .as_ref()
+                .map(|b| String::from_utf8_lossy(b).to_string())
+                .unwrap_or_else(|| "<no body>".to_string());
+            anyhow!(
+                "WebSocket HTTP handshake failed: {}\nHeaders:{}\nBody: {}",
+                status,
+                header_lines,
+                body_text
+            )
+        }
+        WsError::Io(e) => anyhow!("WebSocket I/O error: {}", e),
+        WsError::Tls(e) => anyhow!("WebSocket TLS error: {}", e),
+        WsError::Protocol(e) => anyhow!("WebSocket protocol error: {}", e),
+        WsError::Capacity(e) => anyhow!("WebSocket capacity error: {}", e),
+        WsError::AlreadyClosed => anyhow!("WebSocket already closed"),
+        WsError::ConnectionClosed => anyhow!("WebSocket connection closed"),
+        WsError::Url(e) => anyhow!("WebSocket URL error: {}", e),
+        WsError::HttpFormat(e) => anyhow!("WebSocket HTTP format error: {}", e),
+        WsError::Utf8 => anyhow!("WebSocket UTF-8 error"),
+        other => anyhow!(other),
+    }
 }
 
 pub struct SttClient {
@@ -83,7 +124,7 @@ impl SttClient {
     {
         // Build WebSocket URL with query parameters
         let ws_url = format!(
-            "{}?model=flux-general-en&sample_rate={}",
+            "{}?model=flux-general-en&sample_rate={}&encoding=linear16",
             self.url, self.sample_rate
         );
 
@@ -116,9 +157,7 @@ impl SttClient {
         }
 
         // Establish WebSocket connection with the request
-        let (ws_stream, _) = connect_async(request)
-            .await
-            .context("Failed to connect to WebSocket")?;
+        let (ws_stream, _resp) = connect_async(request).await.map_err(enrich_ws_error)?;
 
         debug!("Connected to speech-to-text service");
 
@@ -132,9 +171,13 @@ impl SttClient {
             // Task to send audio data (fatal on send error)
             let send_task = tokio::spawn(async move {
                 while let Some(audio_data) = audio_rx.recv().await {
-                    if let Err(e) = ws_sender.send(Message::Binary(audio_data)).await {
+                    if let Err(e) = ws_sender
+                        .send(Message::Binary(audio_data))
+                        .await
+                        .map_err(enrich_ws_error)
+                    {
                         error!("Failed to send audio data: {}", e);
-                        return Err(anyhow!("failed to send audio over websocket: {e}"));
+                        return Err(e);
                     }
                 }
 
@@ -144,7 +187,7 @@ impl SttClient {
                 ws_sender
                     .send(Message::Text(close_msg))
                     .await
-                    .map_err(|e| anyhow!("failed to send CloseStream: {e}"))?;
+                    .map_err(enrich_ws_error)?;
 
                 // Do not close the socket from client; server will close after sending responses
                 Ok::<(), anyhow::Error>(())
@@ -186,11 +229,14 @@ impl SttClient {
                                     sequence_id,
                                     code,
                                     description,
+                                    websocket_close_code,
                                 } => {
-                                    error!("Server error [{}]: {}", code, description);
+                                    error!(
+                                        "Server error [{}]: {} (close_code={:?}, seq={:?})",
+                                        code, description, websocket_close_code, sequence_id
+                                    );
                                     return Err(anyhow!(
-                                        "server error (seq {}): {} - {}",
-                                        sequence_id,
+                                        "server error: {} - {}",
                                         code,
                                         description
                                     ));
@@ -228,8 +274,9 @@ impl SttClient {
                             break;
                         }
                         Err(e) => {
-                            error!("WebSocket error: {}", e);
-                            return Err(anyhow!("websocket receive error: {e}"));
+                            let e2 = enrich_ws_error(e);
+                            error!("WebSocket error: {}", e2);
+                            return Err(e2);
                         }
                         _ => {}
                     }

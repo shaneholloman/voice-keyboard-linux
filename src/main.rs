@@ -282,6 +282,7 @@ where
     let mut audio_buffer = AudioBuffer::new(audio_input.get_sample_rate(), 160);
     let stt_client = SttClient::new(stt_url, audio_input.get_sample_rate());
 
+    info!(?stt_url, "Connecting to STT service...");
     let (audio_tx, handle) = stt_client
         .connect_and_transcribe(on_transcription)
         .await
