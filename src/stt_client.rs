@@ -9,7 +9,7 @@ use tokio_tungstenite::tungstenite::error::Error as WsError;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info};
 
-pub const STT_URL: &str = "wss://api.preview.deepgram.com/v2/listen";
+pub const STT_URL: &str = "wss://api.deepgram.com/v2/listen";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WordInfo {
