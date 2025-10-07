@@ -346,6 +346,9 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
         // Clear the current text tracking
         self.current_text.clear();
 
+        // Add a space after the end of each turn
+        self.hardware.type_text(" ")?;
+
         Ok(())
     }
 
@@ -475,10 +478,11 @@ mod tests {
         assert_eq!(kb.current_text, "hello");
         assert!(!kb.hardware.enter_pressed);
 
-        // Finalize (should not press enter anymore)
+        // Finalize (should not press enter anymore but should add a space)
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
         assert!(!kb.hardware.enter_pressed); // Should remain false
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o', ' ']);
     }
 
     #[test]
@@ -610,12 +614,13 @@ mod tests {
         assert_eq!(kb.current_text, "hello world");
         assert!(!kb.hardware.enter_pressed);
 
-        // Finalize - should not press ENTER key
+        // Finalize - should not press ENTER key but should add a space
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
         assert!(!kb.hardware.enter_pressed);
         // Should not have backspaced anything for the enter command
         assert_eq!(kb.hardware.backspace_count, 0);
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', ' ']);
     }
 
     #[test]
@@ -627,12 +632,13 @@ mod tests {
         assert_eq!(kb.current_text, "enter the room");
         assert!(!kb.hardware.enter_pressed);
 
-        // Finalize - should not press ENTER key since "enter" is not the last word
+        // Finalize - should not press ENTER key since "enter" is not the last word but should add a space
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
         assert!(!kb.hardware.enter_pressed);
         // Should not have backspaced anything for the enter command
         assert_eq!(kb.hardware.backspace_count, 0);
+        assert_eq!(kb.hardware.typed_chars, ['e', 'n', 't', 'e', 'r', ' ', 't', 'h', 'e', ' ', 'r', 'o', 'o', 'm', ' ']);
     }
 
     #[test]
