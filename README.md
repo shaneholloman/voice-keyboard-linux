@@ -78,7 +78,7 @@ sudo -E ./target/debug/voice-keyboard --test-stt
 
 ## Speech-to-Text Service
 
-This application uses **Deepgram Flux**, the company's new turn‑taking STT API. The default WebSocket URL is `wss://api.preview.deepgram.com/v2/listen`.
+This application uses **Deepgram Flux**, the company's new turn‑taking STT API. The default WebSocket URL is `wss://api.deepgram.com/v2/listen`.
 
 ## Command Line Options
 
@@ -89,7 +89,7 @@ OPTIONS:
     --test-audio        Test audio input and show levels
     --test-stt          Test speech-to-text functionality (default if no other mode specified)
     --debug-stt         Debug speech-to-text (print transcripts without typing)
-    --stt-url <URL>     Custom STT service URL (default: wss://api.preview.deepgram.com/v2/listen)
+    --stt-url <URL>     Custom STT service URL (default: wss://api.deepgram.com/v2/listen)
     -h, --help          Print help information
     -V, --version       Print version information
 ```
@@ -116,7 +116,7 @@ The application provides sophisticated real-time transcript updates:
 
 ## About Deepgram Flux (Early Access)
 
-- **Endpoint**: `wss://api.preview.deepgram.com/v2/listen`
+- **Endpoint**: `wss://api.deepgram.com/v2/listen`
 - **What it is**: Flux is Deepgram's turn‑taking, low‑latency STT API designed for conversational experiences.
 - **Authentication**: Send an `Authorization` header. Common forms:
   - `Token <DEEPGRAM_API_KEY>` (what this app uses)
