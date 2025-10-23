@@ -340,14 +340,15 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
                 debug!("Pressing ENTER key");
                 self.hardware.press_enter()?;
             }
+        } else {
+            // Voice-enter disabled: always press ENTER at end-of-turn
+            debug!("Voice-enter disabled; pressing ENTER at end-of-turn");
+            self.hardware.press_enter()?;
         }
         
         // Clear the current text tracking
         self.current_text.clear();
         
-        // Add a space after the end of each turn
-        self.hardware.type_text(" ")?;
-
         Ok(())
     }
 
