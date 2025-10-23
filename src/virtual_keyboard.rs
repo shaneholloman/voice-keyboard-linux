@@ -220,6 +220,7 @@ unsafe impl Sync for RealKeyboardHardware {}
 pub struct VirtualKeyboard<H: KeyboardHardware> {
     hardware: H,
     current_text: String,
+    interpret_enter_word: bool,
 }
 
 impl<H: KeyboardHardware> VirtualKeyboard<H> {
@@ -227,7 +228,13 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
         Self {
             hardware,
             current_text: String::new(),
+            interpret_enter_word: true,
         }
+    }
+
+    /// Enable or disable interpreting the word 'enter' at the end of a turn
+    pub fn set_voice_enter_enabled(&mut self, enabled: bool) {
+        self.interpret_enter_word = enabled;
     }
 
     /// Update the transcript incrementally, handling smart backspacing
@@ -299,53 +306,45 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
     /// Otherwise, just finalize without pressing enter
     pub fn finalize_transcript(&mut self) -> Result<()> {
         debug!("Finalizing transcript: '{}'", self.current_text);
-
-        // Regex to match "enter" (case-insensitive) at the end, optionally followed by
-        // punctuation and/or whitespace: (?i)\s*\benter\b[[:punct:]\s]*$
-        // (?i) = case insensitive
-        // \s* = optional leading whitespace
-        // \benter\b = the word "enter" with word boundaries
-        // [[:punct:]\s]* = optional trailing punctuation or whitespace
-        // $ = end of string
-        let enter_regex = Regex::new(r"(?i)\s*\benter\b[[:punct:]\s]*$").unwrap();
-
-        // Find the match and extract the information we need before mutating self
-        let match_info = enter_regex.find(&self.current_text).map(|m| {
-            (
-                m.start(),
-                m.as_str().chars().count(),
-                m.as_str().to_string(),
-            )
-        });
-
-        if let Some((start_pos, chars_to_backspace, matched_str)) = match_info {
-            debug!(
-                "Found 'enter' command at end of transcript: '{}'",
-                matched_str
-            );
-            debug!(
-                "Backspacing {} characters for 'enter' command",
-                chars_to_backspace
-            );
-
-            // Backspace the matched portion
-            for _ in 0..chars_to_backspace {
-                self.hardware.press_backspace()?;
-                // Small delay between backspaces for reliability
-                std::thread::sleep(std::time::Duration::from_millis(5));
+        
+        if self.interpret_enter_word {
+            // Regex to match "enter" (case-insensitive) at the end, optionally followed by 
+            // punctuation and/or whitespace: (?i)\s*\benter\b[[:punct:]\s]*$
+            // (?i) = case insensitive
+            // \s* = optional leading whitespace  
+            // \benter\b = the word "enter" with word boundaries
+            // [[:punct:]\s]* = optional trailing punctuation or whitespace
+            // $ = end of string
+            let enter_regex = Regex::new(r"(?i)\s*\benter\b[[:punct:]\s]*$").unwrap();
+            
+            // Find the match and extract the information we need before mutating self
+            let match_info = enter_regex.find(&self.current_text).map(|m| {
+                (m.start(), m.as_str().chars().count(), m.as_str().to_string())
+            });
+            
+            if let Some((start_pos, chars_to_backspace, matched_str)) = match_info {
+                debug!("Found 'enter' command at end of transcript: '{}'", matched_str);
+                debug!("Backspacing {} characters for 'enter' command", chars_to_backspace);
+                
+                // Backspace the matched portion
+                for _ in 0..chars_to_backspace {
+                    self.hardware.press_backspace()?;
+                    // Small delay between backspaces for reliability
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                
+                // Update our internal tracking to remove the backspaced characters
+                self.current_text = self.current_text[..start_pos].to_string();
+                
+                // Press the actual ENTER key
+                debug!("Pressing ENTER key");
+                self.hardware.press_enter()?;
             }
-
-            // Update our internal tracking to remove the backspaced characters
-            self.current_text = self.current_text[..start_pos].to_string();
-
-            // Press the actual ENTER key
-            debug!("Pressing ENTER key");
-            self.hardware.press_enter()?;
         }
-
+        
         // Clear the current text tracking
         self.current_text.clear();
-
+        
         // Add a space after the end of each turn
         self.hardware.type_text(" ")?;
 

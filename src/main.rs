@@ -15,6 +15,7 @@ mod virtual_keyboard;
 use audio_input::AudioInput;
 use stt_client::{AudioBuffer, SttClient};
 use virtual_keyboard::{RealKeyboardHardware, VirtualKeyboard};
+use std::time::Instant;
 
 #[derive(Debug)]
 struct OriginalUser {
@@ -137,6 +138,12 @@ async fn main() -> Result<()> {
                 .help("Custom STT service URL")
                 .value_name("URL"),
         )
+        .arg(
+            Arg::new("voice-enter")
+                .long("voice-enter")
+                .help("Interpret the word 'enter' at end-of-turn as an Enter key press")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let device_name = "Voice Keyboard";
@@ -145,7 +152,9 @@ async fn main() -> Result<()> {
     debug!("Creating virtual keyboard device (requires root privileges)...");
     let hardware =
         RealKeyboardHardware::new(device_name).context("Failed to create keyboard hardware")?;
-    let keyboard = VirtualKeyboard::new(hardware);
+    let mut keyboard = VirtualKeyboard::new(hardware);
+    let voice_enter_enabled = matches.get_flag("voice-enter");
+    keyboard.set_voice_enter_enabled(voice_enter_enabled);
     debug!("Virtual keyboard created successfully");
 
     // Step 2: Drop root privileges before initializing audio
@@ -226,10 +235,27 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str
     // Wrap keyboard in a mutex to allow mutable access from the closure
     let keyboard = std::sync::Arc::new(std::sync::Mutex::new(keyboard));
     let keyboard_clone = keyboard.clone();
+    // Rate-limit plain Update logs to at most once per second
+    let last_update_log = std::sync::Arc::new(std::sync::Mutex::new(None::<Instant>));
+    let last_update_log_cloned = last_update_log.clone();
 
     run_stt(stt_url, move |result| {
         if !result.transcript.is_empty() {
-            info!("Transcription [{}]: {}", result.event, result.transcript);
+            if result.event == "Update" {
+                let now = Instant::now();
+                let mut last = last_update_log_cloned.lock().unwrap();
+                let should_log = match *last {
+                    Some(prev) => now.duration_since(prev) >= Duration::from_secs(1),
+                    None => true,
+                };
+                if should_log {
+                    info!("Transcription [{}]: {}", result.event, result.transcript);
+                    *last = Some(now);
+                }
+            } else {
+                // Always log non-Update events (StartOfTurn, Preflight, SpeechResumed, EndOfTurn)
+                info!("Transcription [{}]: {}", result.event, result.transcript);
+            }
         }
 
         let mut kb = keyboard_clone.lock().unwrap();
@@ -251,8 +277,7 @@ async fn test_stt(keyboard: VirtualKeyboard<RealKeyboardHardware>, stt_url: &str
                 }
             }
         }
-    })
-    .await
+    }).await
 }
 
 async fn debug_stt(stt_url: &str) -> Result<()> {
