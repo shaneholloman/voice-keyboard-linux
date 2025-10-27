@@ -221,6 +221,7 @@ pub struct VirtualKeyboard<H: KeyboardHardware> {
     hardware: H,
     current_text: String,
     interpret_enter_word: bool,
+    uppercase_enabled: bool,
 }
 
 impl<H: KeyboardHardware> VirtualKeyboard<H> {
@@ -229,6 +230,7 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
             hardware,
             current_text: String::new(),
             interpret_enter_word: true,
+            uppercase_enabled: false,
         }
     }
 
@@ -237,36 +239,48 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
         self.interpret_enter_word = enabled;
     }
 
+    /// Enable or disable uppercase conversion of all typed text
+    pub fn set_uppercase_enabled(&mut self, enabled: bool) {
+        self.uppercase_enabled = enabled;
+    }
+
     /// Update the transcript incrementally, handling smart backspacing
     /// 1. Type new characters if the new transcript extends the current one
     /// 2. Only backspace the characters that actually changed, then type the new ending
     pub fn update_transcript(&mut self, new_transcript: &str) -> Result<()> {
+        // Conditionally convert the new transcript to uppercase
+        let processed_transcript = if self.uppercase_enabled {
+            new_transcript.to_uppercase()
+        } else {
+            new_transcript.to_string()
+        };
+        
         debug!(
-            "Updating transcript from '{}' to '{}'",
-            self.current_text, new_transcript
+            "Updating transcript from '{}' to '{}' (original: '{}', uppercase: {})",
+            self.current_text, processed_transcript, new_transcript, self.uppercase_enabled
         );
 
         // If the new transcript is empty, clear everything
-        if new_transcript.is_empty() {
+        if processed_transcript.is_empty() {
             self.clear_current_text()?;
             return Ok(());
         }
 
         // Check if the new transcript is just an extension of the current one
-        if new_transcript.starts_with(&self.current_text) {
+        if processed_transcript.starts_with(&self.current_text) {
             // Just type the new characters
-            let new_chars = &new_transcript[self.current_text.len()..];
+            let new_chars = &processed_transcript[self.current_text.len()..];
             if !new_chars.is_empty() {
                 debug!("Typing new characters: '{}'", new_chars);
                 self.hardware.type_text(new_chars)?;
-                self.current_text = new_transcript.to_string();
+                self.current_text = processed_transcript.to_string();
             }
         } else {
             // Find the common prefix between current and new transcript
             let common_prefix_len = self
                 .current_text
                 .chars()
-                .zip(new_transcript.chars())
+                .zip(processed_transcript.chars())
                 .take_while(|(a, b)| a == b)
                 .count();
 
@@ -287,14 +301,14 @@ impl<H: KeyboardHardware> VirtualKeyboard<H> {
             }
 
             // Type the new ending (everything after the common prefix)
-            let new_chars: Vec<char> = new_transcript.chars().collect();
+            let new_chars: Vec<char> = processed_transcript.chars().collect();
             if common_prefix_len < new_chars.len() {
                 let new_ending: String = new_chars[common_prefix_len..].iter().collect();
                 debug!("Typing new ending: '{}'", new_ending);
                 self.hardware.type_text(&new_ending)?;
             }
 
-            self.current_text = new_transcript.to_string();
+            self.current_text = processed_transcript.to_string();
         }
 
         Ok(())
@@ -478,11 +492,11 @@ mod tests {
         assert_eq!(kb.current_text, "hello");
         assert!(!kb.hardware.enter_pressed);
 
-        // Finalize (should not press enter anymore but should add a space)
+        // Finalize (should NOT press enter since text doesn't end with "enter")
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
         assert!(!kb.hardware.enter_pressed); // Should remain false
-        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o', ' ']);
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o']);
     }
 
     #[test]
@@ -614,13 +628,13 @@ mod tests {
         assert_eq!(kb.current_text, "hello world");
         assert!(!kb.hardware.enter_pressed);
 
-        // Finalize - should not press ENTER key but should add a space
+        // Finalize - should NOT press ENTER key since text doesn't end with "enter"
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(!kb.hardware.enter_pressed);
+        assert!(!kb.hardware.enter_pressed); // Should remain false
         // Should not have backspaced anything for the enter command
         assert_eq!(kb.hardware.backspace_count, 0);
-        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd', ' ']);
+        assert_eq!(kb.hardware.typed_chars, ['h', 'e', 'l', 'l', 'o', ' ', 'w', 'o', 'r', 'l', 'd']);
     }
 
     #[test]
@@ -632,13 +646,13 @@ mod tests {
         assert_eq!(kb.current_text, "enter the room");
         assert!(!kb.hardware.enter_pressed);
 
-        // Finalize - should not press ENTER key since "enter" is not the last word but should add a space
+        // Finalize - should NOT press ENTER key since "enter" is not the last word
         kb.finalize_transcript().unwrap();
         assert_eq!(kb.current_text, "");
-        assert!(!kb.hardware.enter_pressed);
+        assert!(!kb.hardware.enter_pressed); // Should remain false
         // Should not have backspaced anything for the enter command
         assert_eq!(kb.hardware.backspace_count, 0);
-        assert_eq!(kb.hardware.typed_chars, ['e', 'n', 't', 'e', 'r', ' ', 't', 'h', 'e', ' ', 'r', 'o', 'o', 'm', ' ']);
+        assert_eq!(kb.hardware.typed_chars, ['e', 'n', 't', 'e', 'r', ' ', 't', 'h', 'e', ' ', 'r', 'o', 'o', 'm']);
     }
 
     #[test]
@@ -806,5 +820,60 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_uppercase_mode_basic() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        kb.set_uppercase_enabled(true);
+
+        // Type some text
+        kb.update_transcript("hello world").unwrap();
+        assert_eq!(kb.current_text, "HELLO WORLD");
+        assert_eq!(kb.hardware.typed_chars, ['H', 'E', 'L', 'L', 'O', ' ', 'W', 'O', 'R', 'L', 'D']);
+    }
+
+    #[test]
+    fn test_uppercase_mode_incremental() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        kb.set_uppercase_enabled(true);
+
+        // Start with "hello"
+        kb.update_transcript("hello").unwrap();
+        assert_eq!(kb.current_text, "HELLO");
+
+        // Extend to "hello world"
+        kb.update_transcript("hello world").unwrap();
+        assert_eq!(kb.current_text, "HELLO WORLD");
+        assert_eq!(kb.hardware.typed_chars, ['H', 'E', 'L', 'L', 'O', ' ', 'W', 'O', 'R', 'L', 'D']);
+    }
+
+    #[test]
+    fn test_uppercase_mode_with_enter_command() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        kb.set_uppercase_enabled(true);
+
+        // Type text ending with "enter"
+        kb.update_transcript("hello enter").unwrap();
+        assert_eq!(kb.current_text, "HELLO ENTER");
+        assert!(!kb.hardware.enter_pressed);
+
+        // Finalize - should backspace "ENTER" and press ENTER key
+        kb.finalize_transcript().unwrap();
+        assert_eq!(kb.current_text, "");
+        assert!(kb.hardware.enter_pressed);
+        // Should have backspaced 6 characters (" ENTER")
+        assert_eq!(kb.hardware.backspace_count, 6);
+    }
+
+    #[test]
+    fn test_normal_mode_basic() {
+        let mut kb = VirtualKeyboard::new(MockKeyboardHardware::new());
+        // uppercase_enabled is false by default
+
+        // Type some text
+        kb.update_transcript("Hello World").unwrap();
+        assert_eq!(kb.current_text, "Hello World");
+        assert_eq!(kb.hardware.typed_chars, ['H', 'e', 'l', 'l', 'o', ' ', 'W', 'o', 'r', 'l', 'd']);
     }
 }

@@ -144,6 +144,12 @@ async fn main() -> Result<()> {
                 .help("Interpret the word 'enter' at end-of-turn as an Enter key press")
                 .action(clap::ArgAction::SetTrue),
         )
+        .arg(
+            Arg::new("uppercase")
+                .long("uppercase")
+                .help("Convert all typed text to uppercase")
+                .action(clap::ArgAction::SetTrue),
+        )
         .get_matches();
 
     let device_name = "Voice Keyboard";
@@ -154,7 +160,9 @@ async fn main() -> Result<()> {
         RealKeyboardHardware::new(device_name).context("Failed to create keyboard hardware")?;
     let mut keyboard = VirtualKeyboard::new(hardware);
     let voice_enter_enabled = matches.get_flag("voice-enter");
+    let uppercase_enabled = matches.get_flag("uppercase");
     keyboard.set_voice_enter_enabled(voice_enter_enabled);
+    keyboard.set_uppercase_enabled(uppercase_enabled);
     debug!("Virtual keyboard created successfully");
 
     // Step 2: Drop root privileges before initializing audio
